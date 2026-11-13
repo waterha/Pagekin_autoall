@@ -7,6 +7,7 @@ import type { ChapterRow, StageLocation, StageProgress, StageStatus } from '../.
 import { ProgressRing } from './ProgressRing'
 import { CHAPTER_PHASE_TEXT, CHAPTER_RUNNING_TEXT, RESOURCE_NAMES, STAGE_NAMES } from './stage-text'
 import { pluralEn } from '../../shared/plural-en'
+import ManuscriptAutomation from './ManuscriptAutomation'
 
 type Text = (zh: string, en: string) => string
 
@@ -92,6 +93,8 @@ export default function StageSpine({ stages, chapters, location: activeLocation,
           <span className="stage-row-meta">{stageMeta(status, text)}</span>
         </>, { 'data-state': status.progress.state, 'data-stage': status.stage }))}
       </ol>
+
+      <ManuscriptAutomation />
 
       {chapterListShown && (
         <ol className="stage-chapters" aria-label={text('章节', 'Chapters')}>

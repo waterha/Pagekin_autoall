@@ -17,6 +17,7 @@ import { throwIfSourceDraftChanged } from '../source-draft-changed'
 import { pluralEn } from '../../../shared/plural-en'
 
 export interface ReviewRevisionCommandSource {
+  openResult?: boolean
   draftPath: string
   draftContent: string
   sourceDraft?: FrozenDraftSourceIdentity
@@ -207,7 +208,8 @@ export abstract class ReviewRevisionCommand extends BaseWorkflowCommand<string> 
     this.assertSession(params)
     this.assertNotCancelled(context)
     if (receipt.kind === 'review') {
-      useEditorStore.getState().openFile({
+      context.data.reviewId = receipt.id
+      if (this.sourceParams.openResult !== false) useEditorStore.getState().openFile({
         id: `review-${sourcePath}-${receipt.index}`, name: text(`审稿报告：第${chapter}章`, `Review report: Chapter ${chapter}`),
         type: 'review-report', content: receipt.content, filePath: sourcePath,
         reportPath: `ai-novel://draft/ch${chapter}/v${receipt.source.version}/review${receipt.index}`,
@@ -216,9 +218,10 @@ export abstract class ReviewRevisionCommand extends BaseWorkflowCommand<string> 
       })
       callbacks.log(text(`审查完成，已生成审稿报告 r${receipt.index}`, `Review complete; created review report r${receipt.index}`))
     } else {
+      context.data.revisionId = receipt.id
       const pending = receipt.revisionStatus === 'pending'
       const revisionPath = formatResourceUri({ kind: 'revision', id: receipt.id })
-      useEditorStore.getState().openFile({
+      if (this.sourceParams.openResult !== false) useEditorStore.getState().openFile({
         id: `diff-${sourcePath}-${receipt.id}`,
         name: this.operation === 'refine-from-review'
           ? text(`审稿修复：第${chapter}章`, `Review fix: Chapter ${chapter}`)

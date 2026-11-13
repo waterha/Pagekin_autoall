@@ -105,6 +105,14 @@ beforeEach(() => {
 afterEach(() => { clearProjectCustomPrompts(); vi.restoreAllMocks(); vi.unstubAllGlobals(); useProjectStore.setState({ currentProject: null }) })
 
 describe('review/revision consumers using the main contract (synthetic transport)', () => {
+  it.each(['review-chapter', 'refine-from-review'] as const)('background %s saves an exact receipt without opening an extra tab', async operation => {
+    const f = setup([{ content: operation === 'review-chapter' ? review : revised, finishReason: 'stop' }])
+    await f.command(operation, { openResult: false }).execute(f.args)
+    expect(f.writes()).toBe(1)
+    expect(f.args.context.data[operation === 'review-chapter' ? 'reviewId' : 'revisionId']).toBe(9)
+    expect(useEditorStore.getState().tabs).toEqual([])
+  })
+
   it.each(['refine-draft', 'refine-from-review'] as const)('saves and reopens complete overlength %s with one notice and no generation on replay', async operation => {
     for (const [sourceUnits, targetUnits] of [[1000, 2000], [1200, 1000], [1000, 1000]]) {
       const project = useProjectStore.getState().currentProject!

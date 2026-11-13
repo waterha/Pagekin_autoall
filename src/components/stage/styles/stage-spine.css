@@ -77,6 +77,33 @@
   white-space: nowrap;
 }
 
+.manuscript-automation {
+  padding: 4px 10px 8px 44px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.manuscript-automation-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  background: var(--paper);
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.manuscript-automation-button:hover { background: var(--sunken); }
+.manuscript-automation-button:focus-visible { box-shadow: var(--focus-ring); }
+.manuscript-automation-button:disabled { opacity: .55; cursor: default; }
+.manuscript-automation-status { font-size: 11px; line-height: 1.5; color: var(--ink-2); overflow-wrap: anywhere; }
+.manuscript-automation-status[data-error] { color: var(--danger); }
+
 .stage-row[aria-current='page'] .stage-row-name {
   font-weight: 600;
   color: var(--accent);

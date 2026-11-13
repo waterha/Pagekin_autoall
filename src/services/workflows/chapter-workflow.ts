@@ -64,6 +64,8 @@ export interface RefineOnlyParams {
 }
 
 export interface RefineFromReviewParams {
+  /** Background automation keeps the chapter visible instead of opening a comparison tab. */
+  openResult?: boolean
   projectPath: string
   chapterNumber: number
   chapterTitle: string
@@ -83,6 +85,7 @@ export interface RefineFromReviewParams {
 }
 
 export interface ReviewOnlyParams {
+  openResult?: boolean
   projectPath: string
   chapterNumber: number
   chapterTitle: string
@@ -102,6 +105,8 @@ export interface FinalizeOnlyParams {
   draftPath: string
   draftContent: string
   snapshot?: import('../finalization-snapshot').FinalizationSnapshot
+  stopOnPostProcessFailure?: boolean
+  eventSource?: 'manual' | 'batch'
 }
 
 // ==========================================
@@ -343,6 +348,7 @@ export function createRefineFromReviewWorkflow(
         executor: async (step, context, callbacks) => {
           const { RefineFromReviewCommand } = await import('./commands/refine-from-review.command')
           const cmd = new RefineFromReviewCommand({
+            openResult: params.openResult,
             draftPath: params.draftPath,
             draftContent: params.draftContent,
             confirmedReviewContent: params.confirmedReviewContent,
@@ -387,6 +393,7 @@ export function createReviewOnlyWorkflow(
         executor: async (step, context, callbacks) => {
           const { ReviewChapterCommand } = await import('./commands/review-chapter.command')
           const cmd = new ReviewChapterCommand({
+            openResult: frozenParams.openResult,
             draftPath: frozenParams.draftPath,
             draftContent: frozenParams.draftContent,
             sourceDraft: frozenParams.sourceDraft,
@@ -442,6 +449,8 @@ export function createFinalizeWorkflow(
             chapterNumber: params.chapterNumber,
             chapterInfo,
             snapshot: params.snapshot,
+            stopOnPostProcessFailure: params.stopOnPostProcessFailure,
+            eventSource: params.eventSource,
           })
           return cmd.execute({ step, context, callbacks })
         },
