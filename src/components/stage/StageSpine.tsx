@@ -8,6 +8,7 @@ import { ProgressRing } from './ProgressRing'
 import { CHAPTER_PHASE_TEXT, CHAPTER_RUNNING_TEXT, RESOURCE_NAMES, STAGE_NAMES } from './stage-text'
 import { pluralEn } from '../../shared/plural-en'
 import ManuscriptAutomation from './ManuscriptAutomation'
+import BlueprintAutomation from './BlueprintAutomation'
 
 type Text = (zh: string, en: string) => string
 
@@ -87,14 +88,17 @@ export default function StageSpine({ stages, chapters, location: activeLocation,
     <nav className="stage-spine" aria-label={text('创作流程', 'Writing flow')}>
       <div className="stage-spine-label" aria-hidden="true">{text('创作流程', 'Writing flow')}</div>
       <ol className="stage-stages">
-        {stages.map(status => row(status.stage, currentStage === status.stage, () => onStage(status.stage), <>
-          <StageMark progress={status.progress} />
-          <span className="stage-row-name">{text(...STAGE_NAMES[status.stage])}</span>
-          <span className="stage-row-meta">{stageMeta(status, text)}</span>
-        </>, { 'data-state': status.progress.state, 'data-stage': status.stage }))}
+        {stages.map(status => <li key={status.stage}>
+          <button type="button" className="stage-row" aria-current={currentStage === status.stage ? 'page' : undefined}
+            onClick={() => onStage(status.stage)} data-state={status.progress.state} data-stage={status.stage}>
+            <StageMark progress={status.progress} />
+            <span className="stage-row-name">{text(...STAGE_NAMES[status.stage])}</span>
+            <span className="stage-row-meta">{stageMeta(status, text)}</span>
+          </button>
+          {status.stage === 'blueprint' && <BlueprintAutomation />}
+          {status.stage === 'manuscript' && <ManuscriptAutomation />}
+        </li>)}
       </ol>
-
-      <ManuscriptAutomation />
 
       {chapterListShown && (
         <ol className="stage-chapters" aria-label={text('章节', 'Chapters')}>
