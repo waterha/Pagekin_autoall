@@ -970,7 +970,7 @@ describe('automatic short outline binding', () => {
     coverage: { required: 1, included: 1, complete: true }, included: [{ sourceId: 'author:required', revision: 1, contentHash: 'a'.repeat(64), category: 'author' as const, required: true, units: 1 }], omitted: [] }
   const outlineTask = { purpose: DRAFT_SHORT_OUTLINE_PURPOSE, output: 'visible-text' as const, messages: [{ role: 'user' as const, content: outlinePrompt }] }
   const draftTask = (content: string) => ({ ...task, messages: [{ role: 'user' as const, content }] })
-  it('generates and saves three chapters with edited blueprints in one owner session', async () => {
+  it('generates and saves three chapters, retrying the next chapter connection failure in the same owner session', async () => {
     const dispatch = vi.fn<GenerationRunServiceDependencies['dispatch']>()
     const f = fixture(dispatch)
     f.db.exec("INSERT INTO blueprints(chapter_number,title) VALUES(2,'第二章'),(3,'第三章')")
@@ -978,6 +978,11 @@ describe('automatic short outline binding', () => {
     for (const chapterNumber of [1, 2, 3]) {
       f.db.prepare('UPDATE blueprints SET title=? WHERE chapter_number=?').run(`作者修改后的第${chapterNumber}章`, chapterNumber)
       const chapterOutline = `第${chapterNumber}章：${outline}`, prose = `第${chapterNumber}章清晨，林岚带着昨日的线索走向城门。`
+      if (chapterNumber === 2) dispatch.mockImplementationOnce(async (_request, options) => {
+        options.onDiagnostics?.({ startedAt: 1, elapsedMs: 10000, firstResponseMs: null, lastResponseMs: null, lastOutputMs: null,
+          phase: 'request', endReason: 'failed', visibleEvents: 0, reasoningEvents: 0, causeCode: 'UND_ERR_CONNECT_TIMEOUT' })
+        throw new Error('NETWORK_ERROR')
+      })
       for (const text of [chapterOutline, prose]) dispatch.mockImplementationOnce(async (_request, options) => {
         options.onVisible({ kind: 'delta', text })
         return { finishReason: 'stop', usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30,
@@ -986,7 +991,11 @@ describe('automatic short outline binding', () => {
       const run = f.owner.begin({ ...f.begin, chapterNumber, uiActionNonce: `chapter-${chapterNumber}`, materialDecision: decision,
         selectedBlueprintChapterNumbers: [chapterNumber], authorInputs: [{ id: 'draft:target-units', text: '20' }] })
       roots.add(run.handle.rootActionId); runs.add(run.handle.runId)
-      await f.owner.execute({ handle: run.handle, invocationNonce: 'outline', task: outlineTask })
+      const outlined = await f.owner.execute({ handle: run.handle, invocationNonce: 'outline', task: outlineTask })
+      if (chapterNumber === 2) {
+        expect(f.owner.readContext(run.handle).draftShortOutline?.retry.kind).toBe('available')
+        await f.owner.retryDraftShortOutline({ handle: run.handle, failedAttemptId: outlined.outcome.receipt.visibleArtifact!.attemptId })
+      }
       const context = f.owner.readContext(run.handle)
       expect(context.draftShortOutline?.completedOutput).toBe(chapterOutline)
       outlineArtifacts.add(context.draftShortOutline!.artifactIds[0]!)
@@ -996,11 +1005,63 @@ describe('automatic short outline binding', () => {
       f.owner.composeVisible(run.handle, [drafted.outcome.receipt.visibleArtifact!.artifactId], textHash(visible), DRAFT_VISIBLE_TEXT_VERSION)
       expect(f.owner.commitDraft({ handle: run.handle, chapterNumber, source: 'write', expectedCompositionHash: textHash(visible) }).content).toBe(prose)
       expect(f.owner.readContext(run.handle).draftSave.kind).toBe('current')
-      expect(f.owner.read(run.handle).ledger?.physicalRequests).toBe(2)
+      expect(f.owner.read(run.handle).ledger?.physicalRequests).toBe(chapterNumber === 2 ? 3 : 2)
     }
     expect([roots.size, runs.size, outlineArtifacts.size]).toEqual([3, 3, 3])
-    expect(dispatch).toHaveBeenCalledTimes(6)
+    expect(dispatch).toHaveBeenCalledTimes(7)
   })
+  it.each([false, true])('retries a short-outline connection timeout once without resetting its root or accounting (reopen=%s)', async reopen => {
+    const fetch = syntheticStream()
+    fetch.mockRejectedValueOnce(new TypeError('fetch failed', { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' } }))
+    const f = fixture(), run = f.owner.begin({ ...f.begin, materialDecision: decision })
+    const failed = await f.owner.execute({ handle: run.handle, invocationNonce: 'outline', task: outlineTask })
+    expect(failed.outcome).toMatchObject({ status: 'incomplete', content: '', finishReason: 'error',
+      receipt: { failureCode: 'NETWORK_ERROR', diagnostics: { phase: 'request', causeCode: 'UND_ERR_CONNECT_TIMEOUT' } } })
+    const failedAttemptId = failed.outcome.receipt.visibleArtifact!.attemptId
+    const before = f.db.prepare('SELECT * FROM generation_attempts WHERE attempt_id=?').get(failedAttemptId)
+    const owner = reopen ? f.reopen() : f.owner
+    const handle = reopen ? (await owner.resume(run.handle)).handle : run.handle
+    expect(owner.readContext(handle).draftShortOutline?.retry).toEqual({ kind: 'available', failedAttemptId })
+    const retried = await owner.retryDraftShortOutline({ handle, failedAttemptId })
+    expect(retried.outcome).toMatchObject({ status: 'completed', content: ' 正文\n', finishReason: 'stop' })
+    expect(retried.run.handle.rootActionId).toBe(run.handle.rootActionId)
+    expect(retried.run.ledger?.physicalRequests).toBe(2)
+    expect(f.db.prepare('SELECT * FROM generation_attempts WHERE attempt_id=?').get(failedAttemptId)).toEqual(before)
+    expect(owner.readContext(handle).draftShortOutline?.retry).toEqual({ kind: 'unavailable' })
+    await owner.retryDraftShortOutline({ handle, failedAttemptId })
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+  it('does not authorize a third outline when the network retry also times out', async () => {
+    const fetch = vi.fn().mockRejectedValue(new TypeError('fetch failed', { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' } }))
+    vi.stubGlobal('fetch', fetch)
+    const f = fixture(), run = f.owner.begin({ ...f.begin, materialDecision: decision })
+    const failed = await f.owner.execute({ handle: run.handle, invocationNonce: 'outline', task: outlineTask })
+    const failedAttemptId = failed.outcome.receipt.visibleArtifact!.attemptId
+    const retried = await f.owner.retryDraftShortOutline({ handle: run.handle, failedAttemptId })
+    expect(retried.outcome.receipt.failureCode).toBe('NETWORK_ERROR')
+    expect(f.owner.readContext(run.handle).draftShortOutline?.retry).toEqual({ kind: 'unavailable' })
+    await expect(f.owner.retryDraftShortOutline({ handle: run.handle,
+      failedAttemptId: retried.outcome.receipt.visibleArtifact!.attemptId })).rejects.toThrow('GENERATION_DRAFT_SHORT_OUTLINE_RETRY_UNAVAILABLE')
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(f.owner.read(run.handle).ledger?.physicalRequests).toBe(2)
+  })
+  it.each(['partial-output', 'reasoning-output', 'cancelled', 'storage', 'provider'] as const)(
+    'does not retry a failed outline with %s', async failure => {
+      const dispatch = vi.fn<GenerationRunServiceDependencies['dispatch']>(async (_request, options) => {
+        if (failure === 'partial-output') options.onVisible({ kind: 'delta', text: '已生成的计划' })
+        options.onDiagnostics?.({ startedAt: 1, elapsedMs: 10000, firstResponseMs: null, lastResponseMs: null, lastOutputMs: null,
+          phase: 'request', endReason: failure === 'cancelled' ? 'cancelled' : 'failed',
+          visibleEvents: failure === 'partial-output' ? 1 : 0, reasoningEvents: failure === 'reasoning-output' ? 1 : 0 })
+        throw new Error(failure === 'storage' ? 'GENERATION_STORAGE_FAILED' : failure === 'provider' ? 'GENERATION_PROVIDER_FAILED' : 'NETWORK_ERROR')
+      })
+      const f = fixture(dispatch), run = f.owner.begin({ ...f.begin, materialDecision: decision })
+      const failed = await f.owner.execute({ handle: run.handle, invocationNonce: 'outline', task: outlineTask })
+      const failedAttemptId = failed.outcome.receipt.visibleArtifact!.attemptId
+      expect(f.owner.readContext(run.handle).draftShortOutline?.retry).toEqual({ kind: 'unavailable' })
+      await expect(f.owner.retryDraftShortOutline({ handle: run.handle, failedAttemptId })).rejects.toThrow('GENERATION_DRAFT_SHORT_OUTLINE_RETRY_UNAVAILABLE')
+      expect(dispatch).toHaveBeenCalledTimes(1)
+    },
+  )
   it('retries one settled empty outline under the original root and preserves old invocations across reopen', async () => {
     let calls = 0
     const dispatch = vi.fn<GenerationRunServiceDependencies['dispatch']>(async (_request, options) => {

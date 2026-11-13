@@ -1098,7 +1098,9 @@ export class GenerateDraftCommand extends BaseWorkflowCommand {
           }
           if (recovery?.draftShortOutline?.retry?.kind === 'available') {
             this.assertNotCancelled(context)
-            callbacks.log(uiText('重新生成短细纲...', 'Retrying the short chapter outline...'))
+            callbacks.log(outlined?.receipt.failureCode === 'NETWORK_ERROR'
+              ? uiText('短细纲请求网络中断，自动重试一次...', 'The short outline request lost its connection. Retrying once...')
+              : uiText('重新生成短细纲...', 'Retrying the short chapter outline...'))
             const retried = await ipc.invokeWithProjectSession(projectSession, 'generation:retry-draft-short-outline', {
               handle: context.mainGenerationRunHandle!, failedAttemptId: recovery.draftShortOutline.retry.failedAttemptId,
             })
@@ -1119,11 +1121,18 @@ export class GenerateDraftCommand extends BaseWorkflowCommand {
             // 作者取消时请求会被截断着返回，主进程不把取消码交给渲染端；带失败码的是真实失败，照常报短细纲失败。
             // 重试结果直接来自 IPC，不经过 keepReceiptFailuresOnCancel，所以这里自己分辨。
             if (!outlined.receipt.failureCode) this.assertNotCancelled(context)
-            const reason = outlined.finishReason === 'length'
+            const transportCode = outlined.receipt.diagnostics?.causeCode ?? outlined.receipt.diagnostics?.errorCode
+            const reason = outlined.receipt.failureCode === 'NETWORK_ERROR'
+              ? ['UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'ETIMEDOUT'].includes(transportCode ?? '')
+                ? uiText('连接模型服务超时', 'the connection to the model service timed out')
+                : uiText('模型服务的网络连接中断', 'the connection to the model service was interrupted')
+              : outlined.receipt.failureCode === 'GENERATION_PROVIDER_FAILED'
+                ? uiText('模型服务请求失败', 'the model service request failed')
+              : outlined.finishReason === 'length'
               ? uiText('模型输出被截断', 'the model output was truncated')
               : !outlined.content.trim() ? uiText('模型未返回可见内容', 'the model returned no visible content')
                 : uiText('模型未正常完成输出', 'the model did not complete the output normally')
-            const diagnostic = `(GENERATION_DRAFT_SHORT_OUTLINE_FAILED; status=${outlined.status}; finishReason=${outlined.finishReason})`
+            const diagnostic = `(GENERATION_DRAFT_SHORT_OUTLINE_FAILED; status=${outlined.status}; finishReason=${outlined.finishReason}${outlined.receipt.failureCode ? `; failureCode=${outlined.receipt.failureCode}` : ''})`
             throw new Error(uiText(`短细纲生成失败：${reason}。正文尚未开始。${diagnostic}`,
               `The short chapter outline failed: ${reason}. Drafting has not started. ${diagnostic}`))
           }

@@ -2856,6 +2856,7 @@ ${headingPrefix}第3章：潮门
       ['resume', 'not-durable'], ['resume', 'outline-as-prose'], ['resume', 'draft-changed'],
       ['length', 'stop'], ['empty', 'stop'], ['length', 'length'], ['length', 'empty'],
       ['length', 'cancelled'], ['length', 'unavailable'],
+      ['network', 'stop'], ['network', 'network'],
     ] as const)(
       'uses one authorized outline retry after %s and checks durable context before drafting: %s', async (start, finish) => {
         const hash = (text: string) => createHash('sha256').update(text).digest('hex')
@@ -2895,7 +2896,13 @@ ${headingPrefix}第3章：潮门
               setTimeout(() => { f.context.cancelled = true }, 0)
               await new Promise<void>(resolve => { cancelRetry = resolve })
             }
-            const result = outcome(finish === 'empty' ? '' : outline, finish === 'length' || finish === 'cancelled' ? 'length' : 'stop')
+            const result = outcome(finish === 'empty' || finish === 'network' ? '' : outline,
+              finish === 'network' ? 'error' : finish === 'length' || finish === 'cancelled' ? 'length' : 'stop')
+            if (finish === 'network') {
+              result.receipt.failureCode = 'NETWORK_ERROR'
+              result.receipt.diagnostics = { startedAt: 1, elapsedMs: 10000, firstResponseMs: null, lastResponseMs: null,
+                lastOutputMs: null, phase: 'request', endReason: 'failed', visibleEvents: 0, reasoningEvents: 0, causeCode: 'UND_ERR_CONNECT_TIMEOUT' }
+            }
             result.receipt.visibleArtifact = { artifactId: 'retry-outline', attemptId: 'retried', revision: 1, textHash: hash(result.content) }
             return { outcome: result, run: view }
           }
@@ -2904,7 +2911,8 @@ ${headingPrefix}第3章：潮门
             const task = (args[0] as { task: GenerationTask }).task
             if (task.purpose === 'chapter-draft-short-outline') {
               expect(start).not.toBe('resume')
-              const result = outcome(start === 'empty' ? '' : '未完成的计划', start === 'empty' ? 'stop' : 'length')
+              const result = outcome(start === 'empty' || start === 'network' ? '' : '未完成的计划', start === 'network' ? 'error' : start === 'empty' ? 'stop' : 'length')
+              if (start === 'network') result.receipt.failureCode = 'NETWORK_ERROR'
               result.receipt.visibleArtifact = { artifactId: 'old-outline', attemptId: 'failed', revision: 1, textHash: hash(result.content) }
               return { outcome: result, run: view }
             }
@@ -2936,6 +2944,7 @@ ${headingPrefix}第3章：潮门
           expect(f.invoke.mock.calls.some(([channel]) => channel === 'generation:commit-draft')).toBe(false)
           if (finish !== 'outline-as-prose') expect(f.invoke.mock.calls.some(([channel, request]) => channel === 'generation:execute'
             && (request as { task: GenerationTask }).task.purpose === 'chapter-draft')).toBe(false)
+          if (finish === 'network') await expect(execution).rejects.toThrow('连接模型服务超时')
         }
         if (finish === 'draft-changed') {
           expect(f.callbacks.replaceText).not.toHaveBeenCalled()

@@ -201,8 +201,14 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
       || !first || first.attemptId !== failedAttemptId || first.purpose !== DRAFT_SHORT_OUTLINE_PURPOSE)
       throw new Error('GENERATION_DRAFT_SHORT_OUTLINE_RETRY_UNAVAILABLE')
     const receipt = volatileReceipts.get(failedAttemptId) ?? repository.receipt(failedAttemptId)
-    if (receipt.attempt.status !== 'settled' || receipt.failureCode || receipt.unsavedTail || !receipt.artifact
-      || !(receipt.result?.finishReason === 'length' || receipt.result?.finishReason === 'stop' && !receipt.artifact.text.trim()))
+    const emptyNetworkFailure = receipt.attempt.status === 'unknown' && receipt.failureCode === 'NETWORK_ERROR'
+      && receipt.diagnostics?.endReason === 'failed' && receipt.diagnostics.visibleEvents === 0
+      && receipt.diagnostics.reasoningEvents === 0 && !receipt.artifact?.text.trim()
+    const incompleteOutline = receipt.attempt.status === 'settled' && !receipt.failureCode
+      && (receipt.result?.finishReason === 'length' || receipt.result?.finishReason === 'stop' && !receipt.artifact?.text.trim())
+    // A failed connection still consumes its original reservation. Authorize only
+    // the existing single retry, under the same root and frozen request.
+    if ((!emptyNetworkFailure && !incompleteOutline) || receipt.unsavedTail || !receipt.artifact)
       throw new Error('GENERATION_DRAFT_SHORT_OUTLINE_RETRY_UNAVAILABLE')
     const usage: { replayTask?: GenerationTask; requestHash?: string } = JSON.parse(deps.database.prepare('SELECT usage_receipt_json FROM generation_attempts WHERE attempt_id=?').pluck().get(failedAttemptId) as string)
     const task = usage.replayTask
