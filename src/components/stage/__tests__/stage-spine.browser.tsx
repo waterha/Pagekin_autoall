@@ -52,6 +52,38 @@ const WRITING = facts({
 })
 
 describe('四个阶段的状态由项目数据派生', () => {
+  it('千章作品只挂载可见章节，滚动和键盘仍能到达最后一章', async () => {
+    const many = facts({ config: { ...READY_CONFIG, totalChapters: 1000 }, blueprints: blueprints(1000) })
+    const onChapter = vi.fn()
+    const props = { stages: deriveStages(many), chapters: deriveChapters(many),
+      location: { kind: 'stage', stage: 'manuscript', chapter: 950 } as const,
+      onStage: () => undefined, onChapter, onResource: () => undefined, onSettings: () => undefined }
+    host = document.createElement('div')
+    host.className = 'paper-ink stage-shell'
+    host.style.cssText = 'height: 640px; width: 1280px;'
+    document.body.append(host)
+    root = createRoot(host)
+    await act(async () => root!.render(<div className="stage-frame"><StageSpine {...props} /></div>))
+    const list = host.querySelector<HTMLElement>('[aria-label="章节"]')!
+    expect(list.querySelectorAll('button').length).toBeLessThan(60)
+    const current = list.querySelector<HTMLButtonElement>('[aria-current="page"]')!
+    expect(current.textContent).toContain('第950章标题')
+    const box = list.getBoundingClientRect(), rect = current.getBoundingClientRect()
+    expect(rect.top >= box.top - 1 && rect.bottom <= box.bottom + 1).toBe(true)
+    await act(async () => current.focus())
+    await act(async () => userEvent.keyboard('{End}'))
+    expect(document.activeElement?.textContent).toContain('第1000章标题')
+    await act(async () => (document.activeElement as HTMLButtonElement).click())
+    expect(onChapter).toHaveBeenLastCalledWith(1000)
+    await act(async () => { list.scrollTop = 0; list.dispatchEvent(new Event('scroll')) })
+    expect(list.querySelector('button')?.textContent).toContain('第1章标题')
+    expect(list.querySelectorAll('button').length).toBeLessThan(60)
+    // External navigation to a distant chapter must reveal it even after manual scrolling.
+    await act(async () => root!.render(<div className="stage-frame"><StageSpine {...props}
+      location={{ kind: 'stage', stage: 'manuscript', chapter: 700 }} /></div>))
+    expect(list.querySelector('[aria-current="page"]')?.textContent).toContain('第700章标题')
+  })
+
   it('新作品：设定进行中并写明还差哪几项，其余三步未开始', () => {
     const stages = deriveStages(facts({
       config: { coreOutline: '', genre: '悬疑', targetAudience: '', totalChapters: 24, wordsPerChapter: 3000 },

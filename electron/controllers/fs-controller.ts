@@ -189,7 +189,7 @@ function capabilityDisplayPath(capability: SecureFileCapability): string {
 }
 
 async function readDirRecursive(
-  fileSystem: WindowsSafeFileSystem,
+  fileSystem: Pick<WindowsSafeFileSystem, 'listDirectory'>,
   directory: SecureFileCapability,
 ): Promise<FileNode[]> {
   const entries = await fileSystem.listDirectory(directory)
@@ -216,6 +216,23 @@ async function readDirRecursive(
 export function registerFSController(
   fileSystem: WindowsSafeFileSystem = windowsSafeFileSystem,
 ) {
+  // On Windows every directory read starts a secure helper process. Hundreds
+  // of chapter folders must not start hundreds of helpers at the same time.
+  let activeDirectoryReads = 0
+  const directoryWaiters: Array<() => void> = []
+  const treeReader: Pick<WindowsSafeFileSystem, 'listDirectory'> = {
+    async listDirectory(capability) {
+      if (activeDirectoryReads >= 4) await new Promise<void>(resolve => directoryWaiters.push(resolve))
+      else activeDirectoryReads++
+      try { return await fileSystem.listDirectory(capability) }
+      finally {
+        const next = directoryWaiters.shift()
+        if (next) next() // Transfer the reserved slot directly to the next read.
+        else activeDirectoryReads--
+      }
+    },
+  }
+  const pendingTrees = new Map<string, Promise<FileNode[]>>()
   // 所有项目 fs:* 通道统一以当前租约与 canonical 项目根为权限边界。
   const ipcMain = { handle: registerFilesystemHandler }
   // 安全的异步读取
@@ -280,9 +297,16 @@ export function registerFSController(
   ): Promise<FileNode[]> => {
     // 不把生产读取错误伪装成“空目录”；调用方需要区分真实空项目与读取失败。
     const directory = assertProjectFileOperation(context, dirPath, expectedProjectPath, 'existing')
-    const tree = await readDirRecursive(fileSystem, directory)
-    assertProjectFileOperation(context, dirPath, expectedProjectPath, 'existing')
-    return tree
+    const key = JSON.stringify([context.projectId, context.leaseId, directory])
+    const reading = pendingTrees.get(key) ?? readDirRecursive(treeReader, directory)
+    pendingTrees.set(key, reading)
+    try {
+      const tree = await reading
+      assertProjectFileOperation(context, dirPath, expectedProjectPath, 'existing')
+      return tree
+    } finally {
+      if (pendingTrees.get(key) === reading) pendingTrees.delete(key)
+    }
   })
 
   ipcMain.handle('fs:mkdir', async (

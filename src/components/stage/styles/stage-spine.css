@@ -246,6 +246,21 @@
   background: var(--sunken);
 }
 
+/* Fixed rows make offscreen space independent of chapter count. Spacers keep
+   native scrolling; only the visible rows and a small buffer enter the DOM. */
+.stage-chapters--windowed {
+  display: block;
+  overflow-anchor: none;
+}
+
+.stage-chapters--windowed > li:not([aria-hidden]) {
+  height: 30px;
+}
+
+.stage-chapters--windowed .stage-chapter {
+  height: 29px;
+}
+
 .stage-chapter[data-phase='todo'] {
   color: var(--ink-3);
 }

@@ -1,15 +1,15 @@
-import { useEffect, useRef, type ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { Check, CircleDashed, GitBranch, History, Library, Settings, Trash2, type LucideIcon } from 'lucide-react'
 import { useLocaleStore } from '../../stores/locale-store'
 import type { ResourcePage, WorkStage } from '../../stores/navigation/navigation-intents'
-import { chapterLabel } from '../../shared/chapter-label'
 import type { ChapterRow, StageLocation, StageProgress, StageStatus } from '../../stores/navigation/stage-progress'
 import { ProgressRing } from './ProgressRing'
-import { CHAPTER_PHASE_TEXT, CHAPTER_RUNNING_TEXT, RESOURCE_NAMES, STAGE_NAMES } from './stage-text'
+import { RESOURCE_NAMES, STAGE_NAMES } from './stage-text'
 import { pluralEn } from '../../shared/plural-en'
 import ManuscriptAutomation from './ManuscriptAutomation'
 import BlueprintAutomation from './BlueprintAutomation'
 import BookTokenUsage from './BookTokenUsage'
+import StageChapterList from './StageChapterList'
 
 type Text = (zh: string, en: string) => string
 
@@ -42,13 +42,6 @@ export function StageMark({ progress }: { progress: StageProgress }) {
   return <ProgressRing className="stage-mark" size={22} stroke={2.5} ratio={progress.ratio} />
 }
 
-function ChapterStatus({ row, text }: { row: ChapterRow; text: Text }) {
-  if (row.running) return <span className="stage-chapter-status" data-tone="accent">{text(...CHAPTER_RUNNING_TEXT)}</span>
-  if (row.phase === 'final') return <span className="stage-chapter-dot" role="img" aria-label={text(...CHAPTER_PHASE_TEXT.final)} />
-  if (row.phase === 'todo') return null
-  return <span className="stage-chapter-status">{text(...CHAPTER_PHASE_TEXT[row.phase])}</span>
-}
-
 interface StageSpineProps {
   stages: readonly StageStatus[]
   chapters: readonly ChapterRow[]
@@ -69,13 +62,7 @@ export default function StageSpine({ stages, chapters, location: activeLocation,
   const text = useLocaleStore(s => s.text)
   const currentStage = location?.kind === 'stage' ? location.stage : null
   const currentChapter = location?.kind === 'stage' ? location.chapter : undefined
-  const currentRow = useRef<HTMLButtonElement>(null)
   const chapterListShown = currentStage === 'manuscript' && chapters.length > 0
-
-  // 章节列表可能晚于当前章出现（打开作品时草稿索引后到），列表出现时也要把当前章滚进来
-  useEffect(() => {
-    currentRow.current?.scrollIntoView({ block: 'nearest' })
-  }, [currentChapter, chapterListShown])
 
   const row = (key: string, current: boolean, onClick: () => void, children: ReactNode, attributes: Record<string, string> = {}) => (
     <li key={key}>
@@ -102,27 +89,7 @@ export default function StageSpine({ stages, chapters, location: activeLocation,
       </ol>
 
       {chapterListShown && (
-        <ol className="stage-chapters" aria-label={text('章节', 'Chapters')}>
-          {chapters.map(chapter => {
-            const current = chapter.number === currentChapter
-            return (
-              <li key={chapter.number}>
-                <button
-                  ref={current ? currentRow : undefined}
-                  type="button"
-                  className="stage-chapter"
-                  data-phase={chapter.phase}
-                  aria-current={current ? 'page' : undefined}
-                  onClick={() => onChapter(chapter.number)}
-                >
-                  <span className="stage-chapter-no">{chapter.number}</span>
-                  <span className="stage-chapter-title">{chapter.title || chapterLabel(chapter.number, text)}</span>
-                  <ChapterStatus row={chapter} text={text} />
-                </button>
-              </li>
-            )
-          })}
-        </ol>
+        <StageChapterList chapters={chapters} currentChapter={currentChapter} onChapter={onChapter} text={text} />
       )}
 
       {trashCount > 0 && onTrash && (

@@ -114,17 +114,27 @@ interface DraftDependencyState {
 
 function dependencyStates(
     db: BetterSqlite3.Database,
-    dependencyIds: readonly number[],
+    dependencies: readonly DraftSourceDependency[],
 ): Map<number, DraftDependencyState> {
     const states = new Map<number, DraftDependencyState>()
-    const pendingIds = [...new Set(dependencyIds)]
-    const queuedIds = new Set(pendingIds)
+    const pendingIds: number[] = []
+    const needsLineage = new Map<number, boolean>()
+    const expanded = new Set<number>()
+    const enqueue = (dependency: DraftSourceDependency) => {
+        const traverse = !sealsLineage(dependency)
+        const previous = needsLineage.get(dependency.draftId)
+        if (previous === undefined || traverse && !previous) {
+            needsLineage.set(dependency.draftId, traverse)
+            pendingIds.push(dependency.draftId)
+        }
+    }
+    dependencies.forEach(enqueue)
     for (let offset = 0; offset < pendingIds.length;) {
-        const chunk = pendingIds.slice(offset, offset + 500)
-        offset += chunk.length
-        if (chunk.length === 0) continue
-        const placeholders = chunk.map(() => '?').join(', ')
-        const rows = db.prepare(`
+        const batch = [...new Set(pendingIds.slice(offset, offset + 500))]
+        offset += Math.min(500, pendingIds.length - offset)
+        const missing = batch.filter(id => !states.has(id))
+        const placeholders = missing.map(() => '?').join(', ')
+        const rows = missing.length ? db.prepare(`
           SELECT drafts.id, drafts.chapter_number, drafts.status, drafts.source_dependencies,
                  contents.body,
                  finalization_outbox.finalization_id,
@@ -140,7 +150,7 @@ function dependencyStates(
           JOIN contents ON contents.id = drafts.content_id
           LEFT JOIN finalization_outbox ON finalization_outbox.draft_id = drafts.id
           WHERE drafts.id IN (${placeholders})
-        `).all(...chunk) as Array<{
+        `).all(...missing) as Array<{
             id: number
             chapter_number: number
             status: string
@@ -150,7 +160,7 @@ function dependencyStates(
             receipt_content_hash: string | null
             content_snapshot: string | null
             authoritative_finalized: number
-        }>
+        }> : []
         for (const row of rows) {
             const parsedDependencies = parseDependencies(row.source_dependencies)
             states.set(row.id, {
@@ -164,12 +174,15 @@ function dependencyStates(
                 receiptContentHash: row.receipt_content_hash,
                 receiptContentMatches: row.content_snapshot === null || row.content_snapshot === row.body,
             })
-            if (!parsedDependencies.valid) continue
-            for (const dependency of parsedDependencies.dependencies) {
-                if (queuedIds.has(dependency.draftId)) continue
-                queuedIds.add(dependency.draftId)
-                pendingIds.push(dependency.draftId)
-            }
+        }
+        // A confirmed source's body/receipt still has to match, but its older
+        // lineage is sealed. Candidate references keep the full transitive check.
+        // A source reached in both roles can be upgraded and expanded later.
+        for (const id of batch) {
+            const state = states.get(id)
+            if (!needsLineage.get(id) || expanded.has(id) || !state?.sourceDependenciesValid) continue
+            expanded.add(id)
+            state.sourceDependencies.forEach(enqueue)
         }
     }
     return states
@@ -276,7 +289,7 @@ function rowsToMeta(db: BetterSqlite3.Database, rows: Record<string, unknown>[])
     const parsed = rows.map(row => ({ row, ...parseDependencies(row.source_dependencies) }))
     const states = dependencyStates(
         db,
-        parsed.flatMap(item => item.dependencies.map(dependency => dependency.draftId)),
+        parsed.flatMap(item => item.dependencies),
     )
     const memo = new Map<number, boolean>()
     return parsed.map(({ row, dependencies, valid }) => rowToMeta(row, dependencies, valid, states, memo))
@@ -319,7 +332,7 @@ function openReopenDraft(db: BetterSqlite3.Database, chapterNumber: number): { i
     const reopened = rows
         .map(row => ({ row, sourceDependencies: parseDependencies(row.source_dependencies).dependencies }))
         .filter(({ sourceDependencies }) => reopenedFinal({ chapterNumber, sourceDependencies }) !== null)
-    const states = dependencyStates(db, reopened.flatMap(({ sourceDependencies }) => sourceDependencies.map(dependency => dependency.draftId)))
+    const states = dependencyStates(db, reopened.flatMap(({ sourceDependencies }) => sourceDependencies))
     const memo = new Map<number, boolean>()
     const open = reopened.find(({ row, sourceDependencies }) => isOpenReopenDraft({
         chapterNumber,
@@ -368,7 +381,7 @@ export class DraftRepository {
             if (!parsedDependencies.valid) throw new Error('GENERATION_DRAFT_DEPENDENCY_INVALID')
             const states = dependencyStates(
                 db,
-                parsedDependencies.dependencies.map(dependency => dependency.draftId),
+                parsedDependencies.dependencies,
             )
             if (!dependenciesAreCurrent(parsedDependencies.dependencies, states, new Map())) {
                 throw new Error('GENERATION_DRAFT_DEPENDENCY_STALE')

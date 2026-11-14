@@ -78,6 +78,46 @@ afterEach(() => {
 })
 
 describe('draft source dependencies', () => {
+  it('bounds current-chapter reads at confirmed history rather than loading the entire long book', () => {
+    const db = getProjectDb()!
+    const body = '长篇正文。'.repeat(2000)
+    let previous = 0
+    db.transaction(() => {
+      for (let chapter = 1; chapter <= 120; chapter++) {
+        const contentId = Number(db.prepare('INSERT INTO contents(body) VALUES (?)').run(body).lastInsertRowid)
+        previous = Number(db.prepare(`INSERT INTO drafts_all
+          (chapter_number, version, source, content_id, word_count, status, source_dependencies)
+          VALUES (?, 1, 'write', ?, ?, 'finalized', ?)`).run(chapter, contentId, body.length,
+            JSON.stringify(previous ? [{ kind: 'legacy-finalized', draftId: previous, chapterNumber: chapter - 1, contentHash: sha256(body) }] : [])).lastInsertRowid)
+      }
+    })()
+    const id = DraftRepository.create({ chapterNumber: 121, source: 'write', content: '当前章。', wordCount: 4,
+      sourceDependencies: [{ kind: 'legacy-finalized', draftId: previous, chapterNumber: 120, contentHash: sha256(body) }] })
+    const prepare = vi.spyOn(db, 'prepare')
+    try {
+      expect(DraftRepository.getMeta(id)?.dependenciesStale).toBe(false)
+      // Loading one current source must not issue one body query per historical chapter.
+      expect(prepare.mock.calls.filter(([sql]) => sql.includes('contents.body'))).toHaveLength(1)
+    } finally { prepare.mockRestore() }
+  })
+
+  it('still expands a source first reached as confirmed history when a later candidate requires its lineage', () => {
+    const first = DraftRepository.create({ chapterNumber: 1, source: 'write', content: '前史。', wordCount: 3 })
+    const confirmed = DraftRepository.create({ chapterNumber: 2, source: 'write', content: '定稿。', wordCount: 3,
+      sourceDependencies: [{ draftId: first, contentHash: sha256('前史。') }] })
+    finalize(confirmed, 2, '定稿。', 'mixed-confirmed')
+    const candidate = DraftRepository.create({ chapterNumber: 3, source: 'write', content: '候选。', wordCount: 3,
+      sourceDependencies: [{ kind: 'candidate', draftId: confirmed, contentHash: sha256('定稿。') }] })
+    const downstream = DraftRepository.create({ chapterNumber: 4, source: 'write', content: '后续。', wordCount: 3,
+      sourceDependencies: [finalizedDependency(confirmed, 2, '定稿。', 'mixed-confirmed'),
+        { kind: 'candidate', draftId: candidate, contentHash: sha256('候选。') }] })
+    expect(DraftRepository.getMeta(downstream)?.dependenciesStale).toBe(false)
+    DraftRepository.updateContent(first, '变化的前史。', 6)
+    expect(DraftRepository.getMeta(downstream)?.dependenciesStale).toBe(true)
+    expect(() => DraftRepository.create({ chapterNumber: 5, source: 'write', content: '不能继承。', wordCount: 5,
+      sourceDependencies: [{ draftId: downstream, contentHash: sha256('后续。') }] })).toThrow('GENERATION_DRAFT_DEPENDENCY_STALE')
+  })
+
   it('persists ordered source identities and keeps the downstream draft while marking changed prose stale', () => {
     const firstContent = '第一章候选原文。'
     const secondContent = '第二章候选原文。'

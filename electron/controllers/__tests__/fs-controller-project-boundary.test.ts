@@ -162,6 +162,31 @@ afterEach(() => {
 })
 
 describe('project-scoped filesystem boundary', () => {
+  it('bounds directory helper concurrency and shares overlapping scans for a large book', async () => {
+    let active = 0, peak = 0, roots = 0
+    const list = vi.spyOn(testFileSystem, 'listDirectory').mockImplementation(async capability => {
+      active++
+      peak = Math.max(peak, active)
+      try {
+        await Promise.resolve()
+        if (!capability.relativePath) {
+          roots++
+          return Array.from({ length: 200 }, (_, i) => ({ name: `chapter-${i}`, isDirectory: true }))
+        }
+        return [{ name: 'prose.md', isDirectory: false }]
+      } finally { active-- }
+    })
+    const results = await Promise.all(Array.from({ length: 3 }, () => handler('fs:list-dir')({}, projectAPath, projectAPath)))
+    expect((results[0] as unknown[])).toHaveLength(200)
+    expect(results[1]).toEqual(results[0])
+    expect(peak).toBeLessThanOrEqual(4)
+    expect(roots).toBe(1)
+    // Reuse lasts only while reading; later changes must be visible immediately.
+    await handler('fs:list-dir')({}, projectAPath, projectAPath)
+    expect(roots).toBe(2)
+    list.mockRestore()
+  })
+
   it('does not register legacy raw external filesystem channels', () => {
     expect(mocks.handlers.has('fs:external-read-file')).toBe(false)
     expect(mocks.handlers.has('fs:external-write-file')).toBe(false)
