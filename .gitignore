@@ -30,6 +30,28 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+/.ai-novel/
+/.vela/
+/models.json
+models.json
+/config.json
+/recent-projects.json
+credentials.json
+secrets.json
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.lnk
 
 # 临时文件
 *.local

@@ -16,6 +16,8 @@
     "clean:build": "node scripts/clean-build-output.mjs",
     "typecheck": "tsc --noEmit",
     "check:i18n": "node scripts/check-i18n-coverage.mjs",
+    "check:secrets": "node scripts/check-secrets.mjs --tracked",
+    "check:secrets:history": "node scripts/check-secrets.mjs --history",
     "test": "vitest run",
     "test:browser": "vitest run --config vitest.browser.config.ts",
     "verify:drive": "node scripts/redesign/drive.mjs",
