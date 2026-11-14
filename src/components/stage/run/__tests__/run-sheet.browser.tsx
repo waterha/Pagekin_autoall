@@ -136,7 +136,9 @@ describe('运行侧页', () => {
     await vi.waitFor(() => expect(host!.querySelector('table')?.textContent).toContain('夹具模型'))
     expect(host!.querySelector('[aria-label="调用统计"]')?.textContent).toContain('1.5万')
     expect(button('复制安全诊断')).toBeTruthy()
-    expect(host!.textContent).not.toMatch(/token/i)
+    expect(host!.textContent).toContain('累计 Token')
+    expect(host!.textContent).toContain('今日 Token')
+    expect(host!.textContent).toContain('本周 Token')
   })
 
   it('要看的运行已结束时直接在历史里展开它', async () => {

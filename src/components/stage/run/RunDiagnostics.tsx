@@ -94,6 +94,10 @@ function ModelCallLog({ text }: { text: Text }) {
       {stats && (
         <StatGrid label={text('调用统计', 'Call summary')} items={[
           { id: 'calls', label: text('调用次数', 'Calls'), value: count(stats.totalCalls) },
+          { id: 'total', label: text('累计 Token', 'All-time tokens'), value: count(stats.totalCalls === 0 ? 0 : stats.totalTokens) },
+          { id: 'today', label: text('今日 Token', 'Today’s tokens'), value: count(stats.periods?.today.totalCalls === 0 ? 0 : stats.periods?.today.totalTokens ?? null) },
+          { id: 'week', label: text('本周 Token', 'This week’s tokens'), value: count(stats.periods?.week.totalCalls === 0 ? 0 : stats.periods?.week.totalTokens ?? null),
+            hint: text('按本地时间，周一开始', 'Local time; week starts Monday') },
           { id: 'input', label: text('输入用量', 'Input usage'), value: count(stats.totalPromptTokens) },
           { id: 'output', label: text('输出用量', 'Output usage'), value: count(stats.totalCompletionTokens),
             hint: stats.knownUsageCalls < stats.totalCalls ? text(`${stats.totalCalls - stats.knownUsageCalls} 次未上报用量`, `${stats.totalCalls - stats.knownUsageCalls} ${pluralEn(stats.totalCalls - stats.knownUsageCalls, 'call')} without usage`) : undefined },

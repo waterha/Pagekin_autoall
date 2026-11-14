@@ -180,6 +180,25 @@
   padding-top: 8px;
 }
 
+.book-token-usage {
+  padding: 10px;
+  margin-bottom: 6px;
+  border-top: 1px solid var(--track);
+  color: var(--ink-2);
+  font-size: 11px;
+}
+
+.book-token-usage h3 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.book-token-usage dl { margin: 0; }
+.book-token-usage dl > div { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
+.book-token-usage dd { margin: 0; font-variant-numeric: tabular-nums; color: var(--ink); }
+.book-token-usage p { margin: 6px 0 0; color: var(--ink-3); line-height: 1.5; }
+
 /* 章节列表底部的回收站入口：和章节行同一缩进，图标占章号那一列。 */
 .stage-spine-trash {
   margin: 2px 0 0 21px;

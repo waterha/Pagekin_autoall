@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3'
 import { getProjectDb } from '../database'
+import type { LLMUsagePeriods, LLMUsagePeriod } from '../../src/shared/llm-usage'
 
 export class LLMHistoryRepository {
   /** 记录一次 LLM 调用 */
@@ -27,7 +28,7 @@ export class LLMHistoryRepository {
   }
 
   /** 获取调用统计 */
-  static getStats(): {
+  static getStats(now = new Date()): {
     totalCalls: number
     successfulCalls: number
     failedCalls: number
@@ -35,8 +36,10 @@ export class LLMHistoryRepository {
     totalTokens: number | null
     totalPromptTokens: number | null
     totalCompletionTokens: number | null
+    periods: LLMUsagePeriods
   } {
     const db = getProjectDb()
+    const empty: LLMUsagePeriod = { totalCalls: 0, knownUsageCalls: 0, totalTokens: null }
     if (!db) return {
       totalCalls: 0,
       successfulCalls: 0,
@@ -45,6 +48,7 @@ export class LLMHistoryRepository {
       totalTokens: null,
       totalPromptTokens: null,
       totalCompletionTokens: null,
+      periods: { today: { ...empty }, week: { ...empty } },
     }
 
     const row = db.prepare(`
@@ -67,11 +71,25 @@ export class LLMHistoryRepository {
       totalCompletionTokens: number | null
     }
 
+    // Boundaries use the desktop's local calendar (Monday starts the week).
+    // Convert them to UTC before comparing SQLite UTC and offset-aware ISO timestamps.
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+    const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (now.getDay() + 6) % 7)
+    const nextMonday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 7)
+    const period = (start: Date, end: Date): LLMUsagePeriod => {
+      const usage = db.prepare(`SELECT COUNT(*) AS totalCalls,
+        COUNT(total_tokens) AS knownUsageCalls, SUM(total_tokens) AS totalTokens
+        FROM llm_calls WHERE julianday(created_at) >= julianday(?) AND julianday(created_at) < julianday(?)
+      `).get(start.toISOString(), end.toISOString()) as LLMUsagePeriod
+      return usage
+    }
     return {
       ...row,
       successfulCalls: row.successfulCalls ?? 0,
       failedCalls: row.failedCalls ?? 0,
       knownUsageCalls: row.knownUsageCalls ?? 0,
+      periods: { today: period(today, tomorrow), week: period(monday, nextMonday) },
     }
   }
 

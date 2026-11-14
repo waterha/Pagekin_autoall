@@ -1192,6 +1192,7 @@ export interface DatabaseChannels {
       totalTokens: number | null
       totalPromptTokens: number | null
       totalCompletionTokens: number | null
+      periods?: import('./llm-usage').LLMUsagePeriods
     }
   }
   'db:get-llm-history': { args: [limit: number | undefined, expectedProjectPath: string]; return: unknown[] }

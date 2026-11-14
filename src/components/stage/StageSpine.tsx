@@ -9,6 +9,7 @@ import { CHAPTER_PHASE_TEXT, CHAPTER_RUNNING_TEXT, RESOURCE_NAMES, STAGE_NAMES }
 import { pluralEn } from '../../shared/plural-en'
 import ManuscriptAutomation from './ManuscriptAutomation'
 import BlueprintAutomation from './BlueprintAutomation'
+import BookTokenUsage from './BookTokenUsage'
 
 type Text = (zh: string, en: string) => string
 
@@ -145,6 +146,7 @@ export default function StageSpine({ stages, chapters, location: activeLocation,
       </ul>
 
       <div className="stage-spine-foot">
+        <BookTokenUsage />
         <button type="button" className="stage-row" aria-current={settingsOpen ? 'page' : undefined} onClick={onSettings}>
           <Settings className="stage-row-icon" size={16} strokeWidth={1.75} aria-hidden="true" />
           <span className="stage-row-label">{text('设置', 'Settings')}</span>

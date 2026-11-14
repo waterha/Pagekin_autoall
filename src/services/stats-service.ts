@@ -21,6 +21,7 @@ export interface LLMStats {
   totalTokens: number | null
   totalPromptTokens: number | null
   totalCompletionTokens: number | null
+  periods?: import('../shared/llm-usage').LLMUsagePeriods
 }
 
 /** LLM 调用记录 */
