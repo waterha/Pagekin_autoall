@@ -4841,6 +4841,62 @@ ${headingPrefix}第3章：潮门
     expectNoDraftPersistence(invoke)
   })
 
+  it('第34章相同的正文连接超时自动重试，沿用已生成短细纲且只保存一次', async () => {
+    const failed = outcome('', 'error')
+    Object.assign(failed.receipt, { failureCode: 'NETWORK_ERROR', diagnostics: {
+      startedAt: Date.now(), elapsedMs: 10381, phase: 'request', endReason: 'failed',
+      firstResponseMs: null, lastResponseMs: null, lastOutputMs: null,
+      visibleEvents: 0, reasoningEvents: 0, errorName: 'TypeError', causeCode: 'UND_ERR_CONNECT_TIMEOUT',
+    } })
+    const runtime = fakeOutcomes(failed, outcome('新章正文。'.repeat(125), 'stop', 2))
+    const { invoke, context, callbacks, command } = setup({ runtime, wordsTarget: 500 })
+    await expect(command.execute({ step: {}, context, callbacks })).resolves.toBe('新章正文。'.repeat(125))
+    expect(runtime.outline).toHaveBeenCalledOnce()
+    expect(runtime.createRuntime).toHaveBeenCalledOnce()
+    expect(runtime.complete).toHaveBeenCalledTimes(2)
+    expect(runtime.complete.mock.calls[0][0]).toEqual(runtime.complete.mock.calls[1][0])
+    expect(invoke.mock.calls.filter(([channel]) => channel === 'db:draft-create')).toHaveLength(1)
+  })
+
+  it('主进程正文超时后在同一root重试，使用新nonce且仅原子提交一次', async () => {
+    const f = setup({ runtime: fakeOutcomes(), mainDefault: true, wordsTarget: 900 })
+    f.context.generationModelId = '合成模型'
+    const handle: MainGenerationRunHandle = { projectId: f.context.projectSession.projectId, epoch: f.context.projectSession.leaseId,
+      rootActionId: '网络重试同一根', runId: '网络重试同一运行' }
+    const view: MainGenerationRunView = { handle, status: 'running', nonReplayable: false, artifacts: [],
+      budget: { maxAttempts: 32, maxRequestedOutputTokens: 2000000, maxRequestedOutputTokensPerAttempt: 32768, deadlineAt: Date.now() + 3600000 } }
+    const text = '潮'.repeat(900), hash = (value: string) => createHash('sha256').update(value).digest('hex')
+    const original = f.invoke.getMockImplementation()!
+    let proseAttempts = 0
+    f.invoke.mockImplementation(async (channel, ...args) => {
+      if (channel === 'generation:begin' || channel === 'generation:read') return view
+      if (channel === 'generation:execute') {
+        const { task } = args[0] as { task: GenerationTask }
+        if (task.purpose === 'chapter-draft-short-outline') return { outcome: outcome('目标：读信；前驱：信已送到；行动与结果：本章读完信；结尾：保留原约束。', 'stop'), run: view }
+        proseAttempts++
+        const result = outcome(proseAttempts === 1 ? '' : text, proseAttempts === 1 ? 'error' : 'stop')
+        if (proseAttempts === 1) Object.assign(result.receipt, { failureCode: 'NETWORK_ERROR', diagnostics: {
+          startedAt: Date.now(), elapsedMs: 10381, phase: 'request', endReason: 'failed', firstResponseMs: null,
+          lastResponseMs: null, lastOutputMs: null, visibleEvents: 0, reasoningEvents: 0, causeCode: 'UND_ERR_CONNECT_TIMEOUT',
+        } })
+        else result.receipt.visibleArtifact = { artifactId: 'prose', attemptId: 'retry-attempt', revision: 1, textHash: hash(text) }
+        return { outcome: result, run: view }
+      }
+      if (channel === 'generation:compose-visible') return { algorithm: DRAFT_VISIBLE_TEXT_VERSION, artifactIds: ['prose'], text, textHash: hash(text), sources: [] }
+      if (channel === 'generation:commit-draft') return { success: true, id: 17, version: 1, content: text, contentHash: hash(text) }
+      return original(channel, ...args)
+    })
+    await expect(f.command.execute({ step: {}, context: f.context, callbacks: f.callbacks })).resolves.toBe(text)
+    const proseCalls = f.invoke.mock.calls.filter(([channel, request]) => channel === 'generation:execute' && (request as { task: GenerationTask }).task.purpose === 'chapter-draft')
+      .map(([, request]) => request as { handle: MainGenerationRunHandle; invocationNonce: string; task: GenerationTask })
+    expect(proseCalls).toHaveLength(2)
+    expect(proseCalls.every(call => call.handle.rootActionId === handle.rootActionId)).toBe(true)
+    expect(new Set(proseCalls.map(call => call.invocationNonce)).size).toBe(2)
+    expect(proseCalls[0].task).toEqual(proseCalls[1].task)
+    expect(f.invoke.mock.calls.filter(([channel]) => channel === 'generation:begin')).toHaveLength(1)
+    expect(f.invoke.mock.calls.filter(([channel]) => channel === 'generation:commit-draft')).toHaveLength(1)
+  })
+
   it('does not turn untrusted failure text into a displayed code', async () => {
     const failed = outcome('', 'error')
     Object.assign(failed.receipt, { failureCode: 'provider body: synthetic-private-key' })

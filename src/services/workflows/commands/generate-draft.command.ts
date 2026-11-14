@@ -5,6 +5,7 @@ import { DRAFT_RECONCILE_PURPOSE, draftReconciliationBlock } from '../../../shar
 import { DEFAULT_MATERIAL_ADMISSION } from '../../../shared/generation-owner-contract'
 import { DRAFT_SHORT_OUTLINE_PURPOSE, DRAFT_SHORT_OUTLINE_UNITS, draftShortOutlinePrompt, draftShortOutlineBlock, draftShortOutlineTask } from '../../../shared/draft-short-outline'
 import { isWorkflowCancellation, WorkflowCancelledError } from '../workflow-cancellation'
+import { withDraftNetworkRetry } from '../draft-network-retry'
 export { sanitizeDraftText } from '../../../shared/draft-visible-text'
 import { createWorkflowMainGenerationRuntime, type WorkflowMainGenerationRequest } from '../workflow-main-generation'
 import type { MainGenerationRunHandle } from '../../generation/generation-runtime'
@@ -1075,7 +1076,7 @@ export class GenerateDraftCommand extends BaseWorkflowCommand {
             acknowledgedIds = [...receipt.artifactIds]
             acknowledgedPreview = receipt.text
           }
-          const draftingSession = injectWritingSkillIntoSession(keepReceiptFailuresOnCancel(session, context), context, 'drafting')
+          const draftingSession = injectWritingSkillIntoSession(withDraftNetworkRetry(keepReceiptFailuresOnCancel(session, context), context, callbacks), context, 'drafting')
           if (context.writingSkills?.drafting) {
             callbacks.log(uiText(
               `本次 drafting 阶段使用已冻结写作 Skill：${context.writingSkills.drafting.name}`,
@@ -1706,6 +1707,11 @@ ${visibleDraft}`,
       const error = this.createIncompleteCompletionError(lastFinishReason)
       if (lastFailureCode === 'GENERATION_PROVIDER_FAILED' || lastFailureCode === 'NETWORK_ERROR')
         Object.assign(error, { code: lastFailureCode })
+      if (lastFailureCode === 'NETWORK_ERROR') {
+        error.message = uiText('写稿时与模型服务的连接超时或中断，未能自动恢复。请检查网络或模型服务后重试，本次未保存正式草稿。',
+          'The connection to the model service timed out or dropped during drafting and could not be restored automatically. Check the network or model service and retry. No formal draft was saved.')
+        throw error
+      }
       error.message = uiText(error.message, (() => {
         switch (lastFinishReason) {
           case 'length':
