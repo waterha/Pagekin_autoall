@@ -21,7 +21,7 @@ export default function ManuscriptAutomation() {
   return <div className="manuscript-automation">
     <button type="button" className="manuscript-automation-button" aria-pressed={active}
       disabled={!project || state.stopping || (state.active && !matches)}
-      title={text('依次写作、审稿、采纳全部修改、定稿，后处理失败时自动重试最多 3 轮，完成后继续下一章，直到已有蓝图结束。', 'Write, review, accept all revisions, finalize, retry failed post-processing up to 3 times, and continue through the available blueprints.')}
+      title={text('自动保存正文修改并处理定稿冲突，依次写作、审稿、采纳全部修改、定稿，后处理失败时自动重试最多 3 轮，完成后继续下一章，直到已有蓝图结束。', 'Save manuscript edits and resolve finalization conflicts automatically, then write, review, accept all revisions, finalize, retry failed post-processing up to 3 times, and continue through the available blueprints.')}
       onClick={() => { if (active) stopManuscriptAutomation(); else void startManuscriptAutomation() }}>
       {active ? <Square size={13} aria-hidden="true" /> : <Play size={13} aria-hidden="true" />}
       {state.stopping && matches ? text('正在停止…', 'Stopping…') : active ? text('停止正文自动化', 'Stop automation') : text('正文自动化', 'Automate manuscript')}

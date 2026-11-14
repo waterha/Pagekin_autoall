@@ -91,7 +91,7 @@ beforeEach(() => {
   commands.invoke.mockImplementation(async (_session: unknown, channel: string, ...args: unknown[]) => {
     if (channel === 'db:draft-authority-sequence') {
       let next = 1
-      while (drafts.get(next * 10)?.status === 'finalized') next++
+      while ([...drafts.values()].some(draft => draft.chapterNumber === next && draft.status === 'finalized')) next++
       return { status: 'valid', nextChapterNumber: next, gaps: [], duplicateChapterNumbers: [] }
     }
     if (channel === 'db:blueprint-get') return Number(args[0]) <= blueprintCount
@@ -100,6 +100,21 @@ beforeEach(() => {
     if (channel === 'db:draft-list-all') return [...drafts.values()]
     if (channel === 'db:draft-get-finalized') return [...drafts.values()].find(draft => draft.chapterNumber === args[0] && draft.status === 'finalized') ?? null
     if (channel === 'db:draft-get-full') return drafts.get(Number(args[0])) ?? null
+    if (channel === 'db:draft-update-content') {
+      const draft = drafts.get(Number(args[0]))!
+      order.push(`save-${draft.chapterNumber}`)
+      drafts.set(draft.id, { ...draft, content: String(args[1]) })
+      return { success: true }
+    }
+    if (channel === 'chapter:reopen') {
+      const chapter = (args[0] as { chapterNumber: number }).chapterNumber
+      const original = drafts.get(chapter * 10)!
+      const draft = { ...original, id: original.id + 1, version: 2, status: 'draft', dependenciesStale: false,
+        sourceDependencies: [{ kind: 'legacy-finalized', draftId: original.id, chapterNumber: chapter, contentHash: 'hash' }] } as Draft
+      drafts.set(draft.id, draft)
+      order.push(`reopen-${chapter}`)
+      return { success: true, created: true, draftId: draft.id, version: draft.version }
+    }
     if (channel === 'db:post-process-get-latest-run') {
       const chapter = Number(args[1])
       return postSteps.has(chapter) ? { id: `post-${chapter}`, triggerSourceId: `finalization:${finalizationIds.get(chapter)}` } : null
@@ -111,6 +126,7 @@ beforeEach(() => {
         chapterNumber: draft.chapterNumber, finalizationId: finalizationIds.get(draft.chapterNumber), contentHash: 'hash' } } }
     }
     if (channel === 'db:revision-get-pending') return pending ? [{ id: 99 }] : []
+    if (channel === 'db:revision-mark-discarded') { order.push('discard-auto-revision'); return { success: true } }
     if (channel === 'db:review-get-full') return reviews.get(Number(args[0]))
     if (channel === 'db:review-cycle-get') return { cycleId: `cycle-${args[0]}`, findings: [
       { reviewItemIndex: 0, findingId: 'finding-a' }, { reviewItemIndex: 1, findingId: 'finding-b' },
@@ -136,7 +152,7 @@ beforeEach(() => {
   })
   commands.review.mockImplementation(async (input: { chapterNumber: number; draftPath: string; reviewCycleId?: string }, { context }: { context: WorkflowContext }) => {
     order.push(`${input.reviewCycleId ? 'recheck' : 'review'}-${input.chapterNumber}`)
-    const draft = drafts.get(input.chapterNumber * 10)!
+    const draft = drafts.get(Number(input.draftPath.split('/').at(-1)))!
     const id = draft.id + 100
     reviews.set(id, { id, baseDraftId: draft.id, reviewIndex: 1, contentId: id, createdAt: '2026-11-13',
       sourceDraft: { id: draft.id, chapterNumber: draft.chapterNumber, version: draft.version, status: 'draft', content: draft.content },
@@ -145,13 +161,15 @@ beforeEach(() => {
       : [{ severity: 'error', category: '情节', description: '问题1', quote: '正文' }, { severity: 'warning', category: '人物', description: '问题2', quote: '正文' }] }) } as Review)
     context.data.reviewId = id
   })
-  commands.revise.mockImplementation(async (input: { chapterNumber: number }, { context }: { context: WorkflowContext }) => {
+  commands.revise.mockImplementation(async (input: { chapterNumber: number; draftPath: string }, { context }: { context: WorkflowContext }) => {
     order.push(`revise-${input.chapterNumber}`)
-    context.data.revisionId = input.chapterNumber * 10 + 200
+    context.data.revisionId = Number(input.draftPath.split('/').at(-1)) + 200
   })
-  commands.finalize.mockImplementation(async (input: { chapterNumber: number }) => {
+  commands.finalize.mockImplementation(async (input: { chapterNumber: number; draftPath: string }) => {
     order.push(`finalize-${input.chapterNumber}`)
-    drafts.get(input.chapterNumber * 10)!.status = 'finalized'
+    const draft = drafts.get(Number(input.draftPath.split('/').at(-1)))!
+    for (const previous of drafts.values()) if (previous.chapterNumber === input.chapterNumber && previous.status === 'finalized') previous.status = 'superseded'
+    draft.status = 'finalized'
   })
   commands.repair.mockImplementation(async (input: { chapterNumber: number; stepKeys: string[] }) => {
     order.push(`repair-${input.chapterNumber}`)
@@ -234,14 +252,203 @@ describe('正文自动化', () => {
     expect(useManuscriptAutomation.getState().active).toBe(false)
   })
 
-  it('未保存正文不会被自动写作覆盖或定稿', async () => {
+  it('自动保存未保存的正文后审稿定稿，并继续下一章', async () => {
     const draft = makeDraft(1)
     useEditorStore.setState({ tabs: [{ id: 'draft', type: 'chapter', projectKey: session.projectPath,
       filePath: `ai-novel://draft/${draft.id}`, content: '作者未保存内容', dirty: true }] as never })
     await startManuscriptAutomation()
-    expect(order).toEqual([])
+    expect(order[0]).toBe('save-1')
+    expect(commands.review.mock.calls[0][0].draftContent).toBe('作者未保存内容')
+    expect(commands.finalize.mock.calls[0][0].draftContent).toBe('作者未保存内容修订')
+    expect(order).toContain('write-2')
+    expect(useManuscriptAutomation.getState().error).toBe(false)
+    expect(useEditorStore.getState().tabs[0]).toMatchObject({ content: '作者未保存内容修订', dirty: false })
+  })
+
+  it('可编辑稿的定稿冲突保存成功后自动清理并继续', async () => {
+    const draft = makeDraft(1)
+    useEditorStore.setState({ tabs: [{ id: 'draft', type: 'chapter', projectKey: session.projectPath,
+      draftId: draft.id, content: '后续修改', dirty: true,
+      finalizationConflict: { finalizationId: 'old-final', publicationStatus: 'published' } }] as never })
+    await startManuscriptAutomation()
+    expect(order[0]).toBe('save-1')
+    expect(commands.review.mock.calls[0][0].draftContent).toBe('后续修改')
+    expect(useEditorStore.getState().tabs[0].finalizationConflict).toBeUndefined()
+    expect(useManuscriptAutomation.getState().error).toBe(false)
+  })
+
+  it('自动保存失败时保留未保存内容和冲突，不审稿或写下一章', async () => {
+    const draft = makeDraft(1)
+    useEditorStore.setState({ tabs: [{ id: 'draft', type: 'chapter', projectKey: session.projectPath,
+      draftId: draft.id, content: '不能丢失的修改', dirty: true,
+      finalizationConflict: { finalizationId: 'old-final', publicationStatus: 'published' } }] as never })
+    const original = commands.invoke.getMockImplementation()!
+    commands.invoke.mockImplementation(async (...args: unknown[]) => args[1] === 'db:draft-update-content'
+      ? { success: false, error: '保存失败' } : original(...args))
+    await startManuscriptAutomation()
+    expect(commands.review).not.toHaveBeenCalled()
+    expect(commands.write).not.toHaveBeenCalled()
+    expect(useEditorStore.getState().tabs[0]).toMatchObject({ content: '不能丢失的修改', dirty: true,
+      finalizationConflict: { finalizationId: 'old-final' } })
+    expect(useManuscriptAutomation.getState()).toMatchObject({ error: true, message: expect.stringContaining('保存失败') })
+  })
+
+  it('保存期间的新输入会再次保存，审稿使用最后的正文', async () => {
+    const draft = makeDraft(1)
+    useEditorStore.setState({ tabs: [{ id: 'draft', type: 'chapter', projectKey: session.projectPath,
+      draftId: draft.id, content: '第一份修改', contentRevision: 1, dirty: true }] as never })
+    const original = commands.invoke.getMockImplementation()!
+    let changed = false
+    commands.invoke.mockImplementation(async (...args: unknown[]) => {
+      const result = await original(...args)
+      if (args[1] === 'db:draft-update-content' && !changed) {
+        changed = true
+        useEditorStore.getState().updateTabContent('draft', '保存期间的新修改')
+      }
+      return result
+    })
+    await startManuscriptAutomation()
+    expect(order.slice(0, 3)).toEqual(['save-1', 'save-1', 'review-1'])
+    expect(commands.review.mock.calls[0][0].draftContent).toBe('保存期间的新修改')
+    expect(useManuscriptAutomation.getState().error).toBe(false)
+  })
+
+  it('审稿期间发生编辑时保存并重新审稿，不沿用旧意见', async () => {
+    const draft = makeDraft(1)
+    useEditorStore.setState({ tabs: [{ id: 'draft', type: 'chapter', projectKey: session.projectPath,
+      draftId: draft.id, content: draft.content, dirty: false }] as never })
+    const original = commands.review.getMockImplementation()!
+    commands.review.mockImplementationOnce(async (...args: unknown[]) => {
+      await original(...args)
+      useEditorStore.getState().updateTabContent('draft', '审稿期间的新修改')
+    })
+    await startManuscriptAutomation()
+    expect(order.slice(0, 4)).toEqual(['review-1', 'save-1', 'review-1', 'revise-1'])
+    expect(commands.review.mock.calls[1][0].draftContent).toBe('审稿期间的新修改')
+    expect(useManuscriptAutomation.getState().error).toBe(false)
+  })
+
+  it('真正已定稿的冲突通过重开稿保存修改，重新定稿后继续下一章', async () => {
+    const draft = makeDraft(1)
+    draft.status = 'finalized'
+    useEditorStore.setState({ tabs: [{ id: 'draft', type: 'chapter', projectKey: session.projectPath,
+      draftId: draft.id, chapterNumber: 1, content: '定稿之后的本地修改', dirty: true,
+      finalizationConflict: { finalizationId: 'final-1', publicationStatus: 'published' } }] as never })
+    await startManuscriptAutomation()
+    expect(order.slice(0, 3)).toEqual(['reopen-1', 'save-1', 'review-1'])
+    expect(commands.review.mock.calls[0][0]).toMatchObject({ draftPath: 'ai-novel://draft/11', draftContent: '定稿之后的本地修改' })
+    expect(drafts.get(10)).toMatchObject({ content: '第1章正文', status: 'superseded' })
+    expect(drafts.get(11)).toMatchObject({ content: '定稿之后的本地修改修订', status: 'finalized' })
+    expect(order).toContain('write-2')
+    expect(useManuscriptAutomation.getState().error).toBe(false)
+    expect(useEditorStore.getState().tabs[0].finalizationConflict).toBeUndefined()
+  })
+
+  it('已定稿正文相同的残留冲突直接核对清理，不重开或重写该章', async () => {
+    const draft = makeDraft(1)
+    draft.status = 'finalized'
+    useEditorStore.setState({ tabs: [{ id: 'draft', type: 'chapter', projectKey: session.projectPath,
+      draftId: draft.id, content: draft.content, dirty: true,
+      finalizationConflict: { finalizationId: 'final-1', publicationStatus: 'published' } }] as never })
+    await startManuscriptAutomation()
+    expect(order[0]).toBe('write-2')
+    expect(useEditorStore.getState().tabs[0]).toMatchObject({ dirty: false, draftStatus: 'finalized' })
+    expect(useEditorStore.getState().tabs[0].finalizationConflict).toBeUndefined()
+    expect(useManuscriptAutomation.getState().error).toBe(false)
+  })
+
+  it('不会保存另一个项目同编号草稿的未保存修改', async () => {
+    makeDraft(1)
+    useEditorStore.setState({ tabs: [{ id: 'other', type: 'chapter', projectKey: 'C:/other-book',
+      draftId: 10, content: '其他作品的修改', dirty: true }] as never })
+    await startManuscriptAutomation()
+    expect(order).not.toContain('save-1')
+    expect(useEditorStore.getState().tabs[0]).toMatchObject({ content: '其他作品的修改', dirty: true })
+    expect(useManuscriptAutomation.getState().error).toBe(false)
+  })
+
+  it('修稿期间的新修改会保存并重审，旧自动修稿不会挡住继续', async () => {
+    const draft = makeDraft(1)
+    useEditorStore.setState({ tabs: [{ id: 'draft', type: 'chapter', projectKey: session.projectPath,
+      draftId: draft.id, content: draft.content, dirty: false }] as never })
+    const original = commands.revise.getMockImplementation()!
+    commands.revise.mockImplementationOnce(async (...args: unknown[]) => {
+      await original(...args)
+      useEditorStore.getState().updateTabContent('draft', '修稿期间的新修改')
+    })
+    await startManuscriptAutomation()
+    expect(order.slice(0, 6)).toEqual(['review-1', 'revise-1', 'discard-auto-revision', 'save-1', 'review-1', 'revise-1'])
+    expect(commands.review.mock.calls[1][0].draftContent).toBe('修稿期间的新修改')
+    expect(useManuscriptAutomation.getState().error).toBe(false)
+  })
+
+  it('自动定稿期间出现后续编辑冲突时也自动保留修改再定稿', async () => {
+    const draft = makeDraft(1)
+    useEditorStore.setState({ tabs: [{ id: 'draft', type: 'chapter', projectKey: session.projectPath,
+      draftId: draft.id, content: draft.content, dirty: false }] as never })
+    const original = commands.finalize.getMockImplementation()!
+    commands.finalize.mockImplementationOnce(async (...args: unknown[]) => {
+      await original(...args)
+      useEditorStore.getState().updateTabContent('draft', '定稿进行中的新修改')
+      useEditorStore.setState(state => ({ tabs: state.tabs.map(tab => ({ ...tab,
+        finalizationConflict: { finalizationId: 'final-1', publicationStatus: 'published' } })) }))
+    })
+    await startManuscriptAutomation()
+    expect(order).toContain('reopen-1')
+    expect(commands.finalize.mock.calls.slice(0, 2).map(call => call[0].draftContent))
+      .toEqual(['第1章正文修订', '定稿进行中的新修改修订'])
+    expect(order).toContain('write-2')
+    expect(useManuscriptAutomation.getState().error).toBe(false)
+  })
+
+  it('保存途中停止或切换项目不会继续审稿，也不清除本地修改', async () => {
+    const draft = makeDraft(1)
+    useEditorStore.setState({ tabs: [{ id: 'draft', type: 'chapter', projectKey: session.projectPath,
+      draftId: draft.id, content: '未保存修改', dirty: true }] as never })
+    const original = commands.invoke.getMockImplementation()!
+    commands.invoke.mockImplementation(async (...args: unknown[]) => {
+      const result = await original(...args)
+      if (args[1] === 'db:draft-update-content') stopManuscriptAutomation()
+      return result
+    })
+    await startManuscriptAutomation()
+    expect(commands.review).not.toHaveBeenCalled()
+    expect(useEditorStore.getState().tabs[0]).toMatchObject({ content: '未保存修改', dirty: true })
+    expect(useManuscriptAutomation.getState()).toMatchObject({ error: false, active: false })
+  })
+
+  it('重开稿保存失败后重新启动会继续处理该章，不会跳过本地修改', async () => {
+    const draft = makeDraft(1)
+    draft.status = 'finalized'
+    useEditorStore.setState({ tabs: [{ id: 'draft', type: 'chapter', projectKey: session.projectPath,
+      draftId: draft.id, content: '需要保留的后续编辑', dirty: true,
+      finalizationConflict: { finalizationId: 'final-1', publicationStatus: 'published' } }] as never })
+    const original = commands.invoke.getMockImplementation()!
+    let failed = false
+    commands.invoke.mockImplementation(async (...args: unknown[]) => {
+      if (args[1] === 'db:draft-update-content' && !failed) {
+        failed = true; return { success: false, error: '临时保存失败' }
+      }
+      return original(...args)
+    })
+    await startManuscriptAutomation()
     expect(useManuscriptAutomation.getState().error).toBe(true)
-    expect(useEditorStore.getState().tabs[0].content).toBe('作者未保存内容')
+    expect(useEditorStore.getState().tabs[0]).toMatchObject({ draftId: 11, dirty: true })
+    await startManuscriptAutomation()
+    expect(commands.review.mock.calls[0][0]).toMatchObject({ chapterNumber: 1, draftContent: '需要保留的后续编辑' })
+    expect(order.filter(item => item === 'reopen-1')).toHaveLength(1)
+    expect(order).toContain('write-2')
+    expect(useManuscriptAutomation.getState().error).toBe(false)
+  })
+
+  it('同一草稿多个标签内容不同时保留两份内容，不随意覆盖', async () => {
+    const draft = makeDraft(1)
+    useEditorStore.setState({ tabs: ['修改甲', '修改乙'].map((content, index) => ({ id: `draft-${index}`,
+      type: 'chapter', projectKey: session.projectPath, draftId: draft.id, content, dirty: true })) as never })
+    await startManuscriptAutomation()
+    expect(order).toEqual([])
+    expect(useEditorStore.getState().tabs.map(tab => tab.content)).toEqual(['修改甲', '修改乙'])
+    expect(useManuscriptAutomation.getState().message).toContain('多个标签内容不同')
   })
 
   it('没有蓝图时给出操作提示，不调用模型', async () => {
