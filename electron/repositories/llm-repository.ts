@@ -2,6 +2,20 @@ import type Database from 'better-sqlite3'
 import { getProjectDb } from '../database'
 import type { LLMUsagePeriods, LLMUsagePeriod } from '../../src/shared/llm-usage'
 
+interface LLMUsageStats {
+  totalCalls: number
+  successfulCalls: number
+  failedCalls: number
+  knownUsageCalls: number
+  totalTokens: number | null
+  totalPromptTokens: number | null
+  totalCompletionTokens: number | null
+  periods: LLMUsagePeriods
+}
+
+// Scope caches to the actual connection, so closing/switching books releases them.
+const statisticsCache = new WeakMap<Database.Database, { changes: number; version: number; calendar: string; stats: LLMUsageStats }>()
+
 export class LLMHistoryRepository {
   /** 记录一次 LLM 调用 */
   static logCall(call: {
@@ -28,16 +42,7 @@ export class LLMHistoryRepository {
   }
 
   /** 获取调用统计 */
-  static getStats(now = new Date()): {
-    totalCalls: number
-    successfulCalls: number
-    failedCalls: number
-    knownUsageCalls: number
-    totalTokens: number | null
-    totalPromptTokens: number | null
-    totalCompletionTokens: number | null
-    periods: LLMUsagePeriods
-  } {
+  static getStats(now = new Date()): LLMUsageStats {
     const db = getProjectDb()
     const empty: LLMUsagePeriod = { totalCalls: 0, knownUsageCalls: 0, totalTokens: null }
     if (!db) return {
@@ -50,6 +55,20 @@ export class LLMHistoryRepository {
       totalCompletionTokens: null,
       periods: { today: { ...empty }, week: { ...empty } },
     }
+
+    // Local boundaries also invalidate the cache at midnight/Monday (including DST).
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+    const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (now.getDay() + 6) % 7)
+    const nextMonday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 7)
+    const calendar = [today, tomorrow, monday, nextMonday].map(date => date.getTime()).join(':')
+    // total_changes observes this connection's writes; data_version observes other
+    // connections' commits, including imports and direct history corrections.
+    const changes = db.prepare('SELECT total_changes()').pluck().get() as number
+    const version = db.pragma('data_version', { simple: true }) as number
+    const cached = statisticsCache.get(db)
+    if (!db.inTransaction && cached?.changes === changes && cached.version === version && cached.calendar === calendar)
+      return structuredClone(cached.stats)
 
     const row = db.prepare(`
       SELECT
@@ -73,10 +92,6 @@ export class LLMHistoryRepository {
 
     // Boundaries use the desktop's local calendar (Monday starts the week).
     // Convert them to UTC before comparing SQLite UTC and offset-aware ISO timestamps.
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
-    const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (now.getDay() + 6) % 7)
-    const nextMonday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 7)
     const period = (start: Date, end: Date): LLMUsagePeriod => {
       const usage = db.prepare(`SELECT COUNT(*) AS totalCalls,
         COUNT(total_tokens) AS knownUsageCalls, SUM(total_tokens) AS totalTokens
@@ -84,13 +99,16 @@ export class LLMHistoryRepository {
       `).get(start.toISOString(), end.toISOString()) as LLMUsagePeriod
       return usage
     }
-    return {
+    const stats: LLMUsageStats = {
       ...row,
       successfulCalls: row.successfulCalls ?? 0,
       failedCalls: row.failedCalls ?? 0,
       knownUsageCalls: row.knownUsageCalls ?? 0,
       periods: { today: period(today, tomorrow), week: period(monday, nextMonday) },
     }
+    // Do not cache uncommitted state: a rollback would otherwise leave stale totals.
+    if (!db.inTransaction) statisticsCache.set(db, { changes, version, calendar, stats: structuredClone(stats) })
+    return stats
   }
 
   /** 获取最近 LLM 调用记录 */

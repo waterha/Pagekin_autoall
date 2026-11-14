@@ -150,10 +150,19 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
             let diagnosticsAt = performance.now();
             let agentProtocolText = '';
             const events = new Map<string, string>();
+            let displayTimer: ReturnType<typeof setTimeout> | undefined;
             const notify = () => { try {
+                clearTimeout(displayTimer);
+                displayTimer = undefined;
                 deps.onSnapshot?.({ attemptId, visibleText: text, durableText: durable, durableRevision: revision, storageFailed, diagnostics });
             }
             catch { /* UI notification cannot alter durable accounting */ } };
+            // A stream can emit thousands of tiny text/diagnostic events. Each display
+            // notification rehydrates a durable receipt in the owner, so combine them.
+            // Checkpoints below still persist and notify immediately, independently.
+            const scheduleDisplay = () => {
+                displayTimer ??= setTimeout(notify, 100);
+            };
             const flush = () => {
                 if (storageFailed || text === durable)
                     return;
@@ -212,7 +221,7 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
                         if (terminal || storageFailed || controller.signal.aborted) return;
                         diagnostics = { ...value };
                         diagnosticsAt = performance.now();
-                        notify();
+                        scheduleDisplay();
                     }, onReasoning: chunk => {
                         if (terminal || storageFailed || controller.signal.aborted || !chunk) return;
                         try { deps.onReasoning?.({ runId: run.runId, rootActionId: run.rootActionId, attemptId, text: chunk }); }
@@ -251,7 +260,7 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
                             return;
                         }
                         text = next;
-                        notify();
+                        scheduleDisplay();
                         if (Buffer.byteLength(text) - Buffer.byteLength(durable) >= 4096)
                             flush();
                     } });
@@ -300,6 +309,7 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
             }
             finally {
                 terminal = true;
+                clearTimeout(displayTimer);
                 if (timer)
                     clearInterval(timer);
                 if (deadline)

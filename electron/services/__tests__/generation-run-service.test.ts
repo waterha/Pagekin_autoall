@@ -25,6 +25,49 @@ function fixture() {
 }
 const usage: GenerationProviderUsage = { promptTokens: 50, completionTokens: 50, totalTokens: 100, reasoningTokens: 20, accounting: 'included-in-completion', totalIncludesReasoning: true, trusted: true };
 describe('single durable generation owner', () => {
+    it('coalesces rapid display notifications without delaying durable checkpoints or losing the last snapshot', async () => {
+        const f = fixture(), onSnapshot = vi.fn(event => f.repository.receipt(event.attemptId));
+        const service = createGenerationRunService({ repository: f.repository, onSnapshot,
+            dispatch: async (_request, callbacks) => {
+                for (let i = 0; i < 2000; i++) callbacks.onVisible({ text: '正文', kind: 'delta' });
+                return { usage, finishReason: 'stop' };
+            } });
+        const run = service.open(f.open);
+        const result = await service.execute(f.request(run.runId));
+        expect(result.artifact?.text).toBe('正文'.repeat(2000));
+        expect(onSnapshot).toHaveBeenCalledTimes(3);
+        expect(onSnapshot.mock.calls.at(-1)?.[0].durableText).toBe('正文'.repeat(2000));
+    });
+    it('combines diagnostics with live text and clears display timers on completion or cancellation', async () => {
+        vi.useFakeTimers();
+        for (const cancel of [false, true]) {
+            const f = fixture(), onSnapshot = vi.fn();
+            let callbacks!: Parameters<Parameters<typeof createGenerationRunService>[0]['dispatch']>[1];
+            let finish!: (result: { usage: typeof usage; finishReason: string }) => void;
+            const service = createGenerationRunService({ repository: f.repository, onSnapshot,
+                dispatch: async (_request, options) => { callbacks = options; return new Promise(resolve => { finish = resolve; }); } });
+            const run = service.open(f.open), operation = service.execute(f.request(run.runId));
+            for (let i = 0; i < 100; i++) {
+                callbacks.onVisible({ kind: 'delta', text: '文' });
+                callbacks.onDiagnostics?.({ startedAt: 0, elapsedMs: i, firstResponseMs: 0, lastResponseMs: i,
+                    lastOutputMs: i, phase: 'stream', visibleEvents: i + 1, reasoningEvents: 0 });
+            }
+            expect(onSnapshot).not.toHaveBeenCalled();
+            await vi.advanceTimersByTimeAsync(100);
+            expect(onSnapshot).toHaveBeenCalledTimes(1);
+            expect(onSnapshot.mock.calls[0][0]).toMatchObject({ visibleText: '文'.repeat(100), durableRevision: 0,
+                diagnostics: { visibleEvents: 100 } });
+            callbacks.onVisible({ kind: 'delta', text: '末尾' });
+            if (cancel) service.cancel(run.rootActionId);
+            else finish({ usage, finishReason: 'stop' });
+            const result = await operation;
+            expect(result.artifact?.text).toBe('文'.repeat(100) + '末尾');
+            expect(onSnapshot.mock.calls.at(-1)?.[0].durableText).toBe(result.artifact?.text);
+            const count = onSnapshot.mock.calls.length;
+            await vi.advanceTimersByTimeAsync(1000);
+            expect(onSnapshot).toHaveBeenCalledTimes(count);
+        }
+    });
     it('rejects an invalid reservation before dispatch independently of unknown model liability', async () => {
         const f = fixture(), run = f.repository.open(f.open), dispatch = vi.fn();
         const request = { ...f.request(run.runId), reservedTokens: 199,

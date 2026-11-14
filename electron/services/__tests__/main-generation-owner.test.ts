@@ -1213,7 +1213,6 @@ describe('automatic short outline binding', () => {
       await expect(runtime.execute(({ session }) => session.complete(outlineTask, { invocationNonce: 'outline' })))
         .resolves.toMatchObject({ status: 'completed', content: outline })
       expect(emitted.map(({ status, revision, durableRevision, text }) => ({ status, revision, durableRevision, text }))).toEqual([
-        { status: 'running', revision: 0, durableRevision: 0, text: '' },
         { status: 'running', revision: 1, durableRevision: 1, text: outline },
         { status: 'completed', revision: 1, durableRevision: 1, text: outline },
       ])

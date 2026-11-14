@@ -20,6 +20,8 @@ import { useWorkflowStore, type WorkflowRun } from '../../../../stores/workflow-
 import RunSheet from '../RunSheet'
 import { createProjectArchTabId } from '../../../editor/arch-file-refresh-policy'
 import { globalEventBus } from '../../../../shared/event-bus'
+import { useManuscriptAutomation } from '../../../../services/manuscript-automation'
+import { useBlueprintAutomation } from '../../../../services/blueprint-automation'
 
 ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -30,7 +32,7 @@ function snapshot<T>(store: StoreApi<T>): () => void {
   const state = store.getState()
   return () => store.setState(state, true)
 }
-const restores = [useProjectStore, useWorkflowStore, useStageStore, useLocaleStore, useLayoutStore, useEditorStore].map(store => snapshot(store as StoreApi<unknown>))
+const restores = [useProjectStore, useWorkflowStore, useStageStore, useLocaleStore, useLayoutStore, useEditorStore, useManuscriptAutomation, useBlueprintAutomation].map(store => snapshot(store as StoreApi<unknown>))
 
 let root: Root | undefined
 let host: HTMLDivElement | undefined
@@ -114,6 +116,32 @@ afterEach(async () => {
 })
 
 describe('运行侧页', () => {
+  it.each([
+    { mode: '正文', setActive: (active: boolean) => useManuscriptAutomation.setState({ session, active }) },
+    { mode: '蓝图', setActive: (active: boolean) => useBlueprintAutomation.setState({ session, active }) },
+  ])('$mode自动化跨环节连续执行时不反复读取历史恢复记录，停止后补读一次', async ({ setActive }) => {
+    const reads = () => invoke.mock.calls.filter(([channel]) => channel === 'generation:list-recovery')
+    setActive(true)
+    await render()
+    expect(reads()).toHaveLength(0)
+    for (let index = 0; index < 5; index++) {
+      await act(async () => {
+        useWorkflowStore.setState({ activeRuns: [], history: [run(String(index), 'completed', { completedAt: String(index) })] })
+        listeners.get('generation:snapshot')?.({ projectId: session.projectId, epoch: session.leaseId, status: 'completed' })
+      })
+    }
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 300)) })
+    expect(reads()).toHaveLength(0)
+    await act(async () => setActive(false))
+    await vi.waitFor(() => expect(reads()).toHaveLength(1))
+  })
+
+  it('其他会话的自动化不推迟本作品的恢复记录读取', async () => {
+    useManuscriptAutomation.setState({ session: { ...session, leaseId: '之前打开' }, active: true })
+    await render()
+    expect(invoke.mock.calls.filter(([channel]) => channel === 'generation:list-recovery')).toHaveLength(1)
+  })
+
   it('三个分页：进行中看运行，历史列出结束的运行并展开看步骤，诊断是宽版', async () => {
     useWorkflowStore.setState({ activeRuns: [run('4', 'running')], history: [run('3', 'completed', { completedAt: '2026-10-12T08:00:00.000Z' })] })
     await render()

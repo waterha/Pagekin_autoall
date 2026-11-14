@@ -1,4 +1,7 @@
 import { createRequire } from 'node:module'
+import fs from 'node:fs'
+import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type BetterSqlite3 from 'better-sqlite3'
 
@@ -65,6 +68,54 @@ describe('book token totals by local calendar', () => {
     db.prepare(`INSERT INTO llm_calls (model_id, total_tokens, success, created_at) VALUES ('model', ?, ?, ?)`)
       .run(total, success, typeof at === 'string' ? at : at.toISOString())
   }
+
+  it('reuses unchanged statistics across repeated polls and invalidates after writes and calendar rollover', () => {
+    const now = new Date(2026, 10, 14, 12)
+    usage(now, 30)
+    const prepare = vi.spyOn(db, 'prepare')
+    const aggregateReads = () => prepare.mock.calls.filter(([sql]) => /FROM llm_calls/.test(sql)).length
+    const first = LLMHistoryRepository.getStats(now)
+    const reads = aggregateReads()
+    first.periods.today.totalTokens = 999
+    for (let i = 0; i < 100; i++) expect(LLMHistoryRepository.getStats(now).periods.today.totalTokens).toBe(30)
+    expect(aggregateReads()).toBe(reads)
+    log(true)
+    expect(LLMHistoryRepository.getStats(now).totalTokens).toBe(60)
+    expect(aggregateReads()).toBeGreaterThan(reads)
+    db.prepare('UPDATE llm_calls SET total_tokens = 40').run()
+    expect(LLMHistoryRepository.getStats(now).totalTokens).toBe(80)
+    expect(LLMHistoryRepository.getStats(new Date(2026, 10, 16, 12)).periods.today.totalCalls).toBe(0)
+    prepare.mockRestore()
+  })
+
+  it('invalidates after another connection writes and never retains rolled-back totals', () => {
+    const schema = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'llm_calls'").pluck().get() as string
+    const file = path.resolve('.runtime', `usage-cache-${randomUUID()}.db`)
+    db.close()
+    db = new Database(file)
+    db.exec(schema)
+    vi.mocked(getProjectDb).mockReturnValue(db)
+    const other = new Database(file)
+    const now = new Date(2026, 10, 14, 12)
+    try {
+      usage(now, 30)
+      expect(LLMHistoryRepository.getStats(now).totalTokens).toBe(30)
+      other.prepare('UPDATE llm_calls SET total_tokens = 40').run()
+      expect(LLMHistoryRepository.getStats(now).totalTokens).toBe(40)
+      expect(() => db.transaction(() => {
+        db.prepare('UPDATE llm_calls SET total_tokens = 90').run()
+        expect(LLMHistoryRepository.getStats(now).totalTokens).toBe(90)
+        throw new Error('rollback')
+      })()).toThrow('rollback')
+      expect(LLMHistoryRepository.getStats(now).totalTokens).toBe(40)
+    } finally {
+      other.close()
+      db.close()
+      fs.unlinkSync(file)
+      // afterEach owns the current connection.
+      db = new Database(':memory:')
+    }
+  })
 
   it('counts all history, local midnight and Monday boundaries, including failed calls with usage', () => {
     const now = new Date(2026, 10, 14, 12)

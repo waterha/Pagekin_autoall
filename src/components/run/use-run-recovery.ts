@@ -18,6 +18,8 @@ import { hideRecovery, readHiddenRecovery } from './hidden-recovery'
 import { projectRuns } from './run-output'
 import type { GenerationRecoveryList } from '../../shared/generation-owner-contract'
 import { throwIfTerminalProviderFailure } from '../../services/generation/generation-harness'
+import { useManuscriptAutomation } from '../../services/manuscript-automation'
+import { useBlueprintAutomation } from '../../services/blueprint-automation'
 
 /** 这部作品有工作流正在发生成请求；暂停与等确认的不算。 */
 function workflowWriting(projectPath: string | undefined, runs = useWorkflowStore.getState().activeRuns): boolean {
@@ -67,6 +69,9 @@ export function useRunRecovery(): RunRecovery {
   const locale = useLocaleStore(s => s.locale)
   const project = useProjectStore(s => s.currentProject)
   const session = useMemo(() => projectSessionContextFromProject(project), [project])
+  const manuscriptAutomating = useManuscriptAutomation(s => s.active && sameProjectSessionContext(s.session, session))
+  const blueprintAutomating = useBlueprintAutomation(s => s.active && sameProjectSessionContext(s.session, session))
+  const automating = manuscriptAutomating || blueprintAutomating
   /** 最近结束的那次运行：历史最多留 50 条，满了以后条数不再变，只能看最前面那条。 */
   const lastEnded = useWorkflowStore(s => s.history[0] ? `${s.history[0].id}:${s.history[0].completedAt ?? ''}` : '')
   const [candidateList, setCandidates] = useState<Loaded<RecoverySources['candidates']>>({ session: null, value: [] })
@@ -112,16 +117,17 @@ export function useRunRecovery(): RunRecovery {
     let timer: ReturnType<typeof setTimeout> | undefined
     const detach = ipc.on('generation:snapshot', snapshot => {
       if (snapshot.projectId !== session.projectId || snapshot.epoch !== session.leaseId || snapshot.status === 'running') return
-      if (workflowWriting(session.projectPath)) { missedWhileWriting.current = true; return }
+      if (automating || workflowWriting(session.projectPath)) { missedWhileWriting.current = true; return }
       clearTimeout(timer)
       timer = setTimeout(() => setRefreshTick(value => value + 1), 100)
     })
     return () => { detach(); clearTimeout(timer) }
-  }, [session])
+  }, [session, automating])
 
-  /** 侧页打开、运行结束或恢复动作之后重读；工作流写作中的每次尝试快照不触发，主进程不必反复整表重算。 */
+  /** 自动化会连续结束多个独立工作流；等整个模式停止后再重读，避免每章每环节重算全部历史。 */
   useEffect(() => {
     if (!session) return
+    if (automating) { missedWhileWriting.current = true; return }
     let active = true
     missedWhileWriting.current = false
     void ipc.invokeWithProjectSession(session, 'generation:list-recovery').then(list => {
@@ -130,7 +136,7 @@ export function useRunRecovery(): RunRecovery {
       setLoadError('')
     }).catch(reason => { if (active) setLoadError(displayedErrorMessage(useLocaleStore.getState().locale, reason)) })
     return () => { active = false }
-  }, [session, lastEnded, refreshTick])
+  }, [session, lastEnded, refreshTick, automating])
 
   useEffect(() => {
     if (!session) return
@@ -140,10 +146,10 @@ export function useRunRecovery(): RunRecovery {
   }, [session])
 
   useEffect(() => {
-    if (writing || !missedWhileWriting.current) return
+    if (automating || writing || !missedWhileWriting.current) return
     missedWhileWriting.current = false
     setRefreshTick(value => value + 1)
-  }, [writing])
+  }, [writing, automating])
 
   const entries = useMemo(() => {
     if (!session) return []
