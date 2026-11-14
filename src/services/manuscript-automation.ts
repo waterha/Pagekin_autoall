@@ -5,6 +5,7 @@ import type { AllInvokeChannels, ProjectSessionContext } from '../shared/ipc-cha
 import { sameProjectPathKey, sameProjectSessionContext } from '../shared/project-session-context'
 import { countDraftUnits } from '../shared/draft-units'
 import { parseChapterGoalReview } from '../shared/chapter-goal-review'
+import { planFinalizationRetry } from '../shared/finalization-step-error'
 import { createHumanConfirmedReviewSnapshot, serializeHumanConfirmedReviewSnapshot, type HumanConfirmedReviewItem } from '../shared/human-confirmed-review'
 import { captureProjectSession, isProjectSessionCurrent } from '../components/project-session-gate'
 import { useProjectStore } from '../stores/project-store'
@@ -21,22 +22,24 @@ import { readWritableChapters } from './authoritative-chapter-sequence'
 import { guardChapterWriting } from './workflow-guards'
 import { captureFinalizationSnapshot } from './finalization-snapshot'
 import { preferredGenerationModelId, chapterDefaultWordsTarget } from './workflows/chapter-write-launch'
-import { createChapterWorkflow, createReviewOnlyWorkflow, createRefineFromReviewWorkflow, createFinalizeWorkflow } from './workflows/chapter-workflow'
+import { createChapterWorkflow, createReviewOnlyWorkflow, createRefineFromReviewWorkflow, createFinalizeWorkflow, createRepairFinalizeWorkflow } from './workflows/chapter-workflow'
 
-type Phase = 'preparing' | 'writing' | 'reviewing' | 'revising' | 'merging' | 'rechecking' | 'finalizing'
+type Phase = 'preparing' | 'writing' | 'reviewing' | 'revising' | 'merging' | 'rechecking' | 'finalizing' | 'retrying'
+const MAX_POST_PROCESS_RETRIES = 3
 interface AutomationState {
   session: ProjectSessionContext | null
   active: boolean
   stopping: boolean
   chapter: number | null
   phase: Phase
+  retryAttempt: number
   message: string
   error: boolean
 }
 
 /** A mode belongs to one open-book lease and survives navigation between pages. */
 export const useManuscriptAutomation = create<AutomationState>(() => ({
-  session: null, active: false, stopping: false, chapter: null, phase: 'preparing', message: '', error: false,
+  session: null, active: false, stopping: false, chapter: null, phase: 'preparing', retryAttempt: 0, message: '', error: false,
 }))
 
 let activeRunId: string | undefined
@@ -59,7 +62,7 @@ export async function startManuscriptAutomation(): Promise<void> {
   const locale = useLocaleStore.getState().locale
   const text = (zh: string, en: string) => localize(locale, zh, en)
   const path = session.projectPath
-  useManuscriptAutomation.setState({ session, active: true, stopping: false, chapter: null, phase: 'preparing', message: '', error: false })
+  useManuscriptAutomation.setState({ session, active: true, stopping: false, chapter: null, phase: 'preparing', retryAttempt: 0, message: '', error: false })
 
   const check = () => {
     if (useManuscriptAutomation.getState().stopping || !isProjectSessionCurrent(session)) throw new AutomationStopped()
@@ -118,6 +121,62 @@ export async function startManuscriptAutomation(): Promise<void> {
       status: draft.status as 'draft' | 'revised' | 'reviewed', contentRevision: 0 },
   }, session)
 
+  const repairPostProcessing = async (draftId: number, chapter: number, expectedContent?: string): Promise<boolean> => {
+    // Resolve through current finalized authority, then pin the exact finalization for every retry.
+    const postRun = await invoke(session, 'db:post-process-get-latest-run', 'chapter_finalize', String(chapter), path)
+    if (!postRun) return false
+    let steps = await invoke(session, 'db:post-process-get-steps', postRun.id, path)
+    const unfinished = () => {
+      const plan = planFinalizationRetry(Object.fromEntries(steps.map(step => [step.stepKey, { ok: step.ok, error: step.errorMsg }])))
+      return { plan, failed: steps.filter(step => !step.ok && !plan.retired.has(step.stepKey)) }
+    }
+    if (!unfinished().failed.length) return false
+    const source = await invoke(session, 'db:continuity-read-source', draftId, path)
+    if (source.status !== 'valid' || source.snapshot.source.chapterNumber !== chapter
+      || (expectedContent !== undefined && source.snapshot.content !== expectedContent)
+      || postRun.triggerSourceId !== `finalization:${source.snapshot.source.finalizationId}`) {
+      throw new Error(text('定稿后处理来源已变化，正文自动化已停止。', 'The finalized post-processing source changed. Automation stopped.'))
+    }
+    const assertSource = async () => {
+      const current = await invoke(session, 'db:continuity-read-source', draftId, path)
+      const authoritative = await invoke(session, 'db:draft-get-finalized', chapter, path)
+      if (current.status !== 'valid' || authoritative?.id !== draftId
+        || current.snapshot.source.finalizationId !== source.snapshot.source.finalizationId
+        || current.snapshot.source.contentHash !== source.snapshot.source.contentHash
+        || current.snapshot.content !== source.snapshot.content) {
+        throw new Error(text('定稿后处理来源已变化，正文自动化已停止。', 'The finalized post-processing source changed. Automation stopped.'))
+      }
+    }
+    for (let attempt = 1; attempt <= MAX_POST_PROCESS_RETRIES; attempt++) {
+      check()
+      const { plan, failed } = unfinished()
+      if (!failed.length) return true
+      if (!plan.card.length) throw new Error(text(
+        `定稿后处理有无法自动重试的步骤：${failed.map(step => step.label).join('、')}。请按后处理页面的说明处理。`,
+        `Some post-finalization steps cannot be retried automatically: ${failed.map(step => step.label).join(', ')}. Follow the notes on the post-processing page.`))
+      await assertSource()
+      phase('retrying')
+      useManuscriptAutomation.setState({ retryAttempt: attempt })
+      try {
+        // This is the same action as the chapter card's Retry failed steps button.
+        await run(createRepairFinalizeWorkflow(chapter, path, session, undefined, source.snapshot.source))
+      } catch (error) {
+        check()
+        if (error instanceof AutomationStopped) throw error
+        // The durable step results decide whether another retry is useful.
+      }
+      await assertSource()
+      const latest = await invoke(session, 'db:post-process-get-latest-run', 'chapter_finalize', String(chapter), path)
+      if (latest?.id !== postRun.id) throw new Error(text('定稿后处理记录已变化，正文自动化已停止。', 'The post-processing record changed. Automation stopped.'))
+      steps = await invoke(session, 'db:post-process-get-steps', postRun.id, path)
+    }
+    const { failed } = unfinished()
+    if (failed.length) throw new Error(text(
+      `定稿后处理自动重试 ${MAX_POST_PROCESS_RETRIES} 轮仍未完成：${failed.map(step => step.label).join('、')}。已定稿正文和成功步骤已保留，请检查后重新开启正文自动化。`,
+      `Post-processing is still incomplete after ${MAX_POST_PROCESS_RETRIES} automatic retries: ${failed.map(step => step.label).join(', ')}. Finalized text and successful steps were preserved. Check the failure before restarting automation.`))
+    return true
+  }
+
   try {
     const llm = useLLMStore.getState()
     const modelId = preferredGenerationModelId(llm.models, routeStageModel('drafting', llm).modelId)
@@ -126,6 +185,15 @@ export async function startManuscriptAutomation(): Promise<void> {
     const wordsTarget = chapterDefaultWordsTarget(project.novelConfig.wordsPerChapter)
     const chapters = await readWritableChapters(session, locale)
     check()
+    // A previous run may have finalized its text before stopping on post-processing.
+    // Repair those chapters before the authority's next writable chapter can skip them.
+    const finalized = (await invoke(session, 'db:draft-list-all', path)).filter(draft => draft.status === 'finalized')
+      .sort((a, b) => a.chapterNumber - b.chapterNumber)
+    for (const draft of finalized) {
+      useManuscriptAutomation.setState({ chapter: draft.chapterNumber })
+      await repairPostProcessing(draft.id, draft.chapterNumber)
+    }
+    useManuscriptAutomation.setState({ message: '' })
     let chapter = chapters.writable[0]
     let processed = 0
     while (chapter !== undefined) {
@@ -222,11 +290,20 @@ export async function startManuscriptAutomation(): Promise<void> {
       const tab = assertEditorUnchanged(draft)[0]
       const snapshotTab = tab ? { ...tab, draftId: draft.id, chapterNumber: chapter, projectSessionLease: session.leaseId } : undefined
       if (snapshotTab) useEditorStore.setState(state => ({ tabs: state.tabs.map(item => item.id === snapshotTab.id ? snapshotTab : item) }))
-      await run(createFinalizeWorkflow({ projectPath: path, chapterNumber: chapter, chapterTitle: title,
-        draftPath: `ai-novel://draft/${draft.id}`, draftContent: draft.content,
-        stopOnPostProcessFailure: true, eventSource: 'batch',
-        ...(snapshotTab ? { snapshot: captureFinalizationSnapshot({ tab: snapshotTab, projectSession: session, chapterTitle: title }) } : {}),
-      }, session))
+      try {
+        await run(createFinalizeWorkflow({ projectPath: path, chapterNumber: chapter, chapterTitle: title,
+          draftPath: `ai-novel://draft/${draft.id}`, draftContent: draft.content,
+          stopOnPostProcessFailure: true, eventSource: 'batch',
+          ...(snapshotTab ? { snapshot: captureFinalizationSnapshot({ tab: snapshotTab, projectSession: session, chapterTitle: title }) } : {}),
+        }, session))
+      } catch (error) {
+        check()
+        if (error instanceof AutomationStopped) throw error
+        const committed = await invoke(session, 'db:draft-get-full', draft.id, path)
+        if (committed?.status !== 'finalized' || committed.content !== draft.content
+          || !await repairPostProcessing(draft.id, chapter, draft.content)) throw error
+      }
+      useManuscriptAutomation.setState({ message: '' })
       await useDraftStore.getState().loadChapterDrafts(chapter, path, session)
       check()
       const authority = await readWritableChapters(session, locale)

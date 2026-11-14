@@ -54,4 +54,11 @@ describe('正文自动化入口', () => {
     expect(host.querySelector('[role=status]')!.getAttribute('data-error')).toBe('true')
     expect(host.textContent).toContain('模型调用失败')
   })
+
+  it('重试后处理时显示章节和重试轮数，仍可停止', async () => {
+    await act(async () => useManuscriptAutomation.setState({ session, active: true, chapter: 3, phase: 'retrying', retryAttempt: 2 }))
+    expect(host.querySelector('[role=status]')!.textContent).toBe('第 3 章 · 自动重试失败步骤（2/3）')
+    await userEvent.click(host.querySelector('button')!)
+    expect(actions.stop).toHaveBeenCalledOnce()
+  })
 })

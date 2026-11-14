@@ -116,6 +116,23 @@ afterEach(() => {
 })
 
 describe('createRepairFinalizeWorkflow', () => {
+  it('refuses a replaced finalization between automation observation and repair execution', async () => {
+    useProjectStore.setState({ currentProject: { id: PROJECT_SESSION.projectId, path: PROJECT_PATH, sessionLease: PROJECT_SESSION.leaseId } as never })
+    vi.stubGlobal('window', { aiNovelAPI: { invoke: vi.fn(async (channel: string) => {
+      if (channel === 'db:draft-get-finalized') return { id: 17 }
+      if (channel === 'db:draft-get-full') return { content: '已定稿正文' }
+      if (channel === 'db:continuity-read-source') return finalizedSource('已定稿正文')
+      throw new Error(`unexpected IPC: ${channel}`)
+    }) } })
+    const repair = createRepairFinalizeWorkflow(3, PROJECT_PATH, PROJECT_SESSION, undefined, {
+      ...finalizedSource('已定稿正文').snapshot.source, finalizationId: 'earlier-finalization',
+    })
+    const step = repair.steps[0]!
+    await expect(step.executor({ ...step, id: 'repair', status: 'running', logs: [] }, context(), callbacks()))
+      .rejects.toThrow('定稿正文来源收据已失效')
+    expect(postProcess.execute).not.toHaveBeenCalled()
+  })
+
   it('scopes direct writing and repair to the target chapter', () => {
     const writing = createChapterWorkflow({
       projectPath: PROJECT_PATH,

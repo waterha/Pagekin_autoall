@@ -478,6 +478,8 @@ export function createRepairFinalizeWorkflow(
   projectPath: string,
   sourceProjectSession: ProjectSessionContext,
   stepKey?: string,
+  /** Automation must not repair a replacement finalized after its failure was observed. */
+  expectedSource?: import('../../shared/finalized-continuity').FinalizedSourceIdentity,
 ): WorkflowDefinition {
   const uiLocale = chapterWorkflowLocale()
   const text = (zhCNText: string, enUSText: string) => localize(uiLocale, zhCNText, enUSText)
@@ -537,6 +539,10 @@ export function createRepairFinalizeWorkflow(
           if (
             finalizedSource.status !== 'valid'
             || finalizedSource.snapshot.content !== full.content
+            || (expectedSource && (finalizedSource.snapshot.source.draftId !== expectedSource.draftId
+              || finalizedSource.snapshot.source.finalizationId !== expectedSource.finalizationId
+              || finalizedSource.snapshot.source.contentHash !== expectedSource.contentHash
+              || finalizedSource.snapshot.source.chapterNumber !== expectedSource.chapterNumber))
           ) throw new Error(text(
             '定稿正文来源收据已失效',
             'The finalized manuscript source receipt is stale.',
