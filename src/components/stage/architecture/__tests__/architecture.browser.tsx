@@ -88,6 +88,14 @@ async function render() {
   await vi.waitFor(() => expect(host!.querySelector('.arch-page[data-loading], .arch-page[data-cast-loading]')).toBeNull())
 }
 
+it('大纲自动化入口只出现在架构中的情节大纲一节', async () => {
+  await render()
+  expect(host!.querySelector('[data-section=synopsis]')!.textContent).toContain('大纲自动化')
+  for (const section of ['premise', 'characters', 'worldbuilding']) {
+    expect(host!.querySelector(`[data-section=${section}]`)!.textContent).not.toContain('大纲自动化')
+  }
+})
+
 beforeEach(() => {
   core = { premise: PREMISE, worldbuilding: '', synopsis: '', totalChapters: 24, writingLanguage: 'zh-CN' }
   partial = null

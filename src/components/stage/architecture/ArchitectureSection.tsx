@@ -8,6 +8,7 @@ import type { ArchitectureOverview } from '../../editor/use-architecture-overvie
 import { Button } from '../../ui/Button'
 import { Menu, type MenuGroupSpec } from '../../ui/Menu'
 import { Notice } from '../../ui/Notice'
+import OutlineAutomation from '../OutlineAutomation'
 import { badgeText, badgeTone, SECTION_NUMERALS, type SectionBadge } from './architecture-sections'
 
 interface SectionProps {
@@ -195,6 +196,7 @@ export default function ArchitectureSection({ sectionKey, overview, badge, summa
       {(sectionKey === 'worldbuilding' || sectionKey === 'synopsis') && (sectionKey === 'synopsis' ? overview.synopsis.candidate : overview.worldBuilding.candidate) && (
         <div className="arch-section-notes"><CandidateNotice sectionKey={sectionKey} overview={overview} /></div>
       )}
+      {sectionKey === 'synopsis' && <div className="arch-section-notes"><OutlineAutomation /></div>}
       {sectionKey === 'synopsis' && <div className="arch-section-notes arch-notes-collapsible"><OutlineNotice overview={overview} onGenerate={onGenerate} /></div>}
       {cast && <div className="arch-section-notes arch-notes-collapsible"><RosterNotice overview={overview} /></div>}
     </section>

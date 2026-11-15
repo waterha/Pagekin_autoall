@@ -22,6 +22,7 @@ import { createProjectArchTabId } from '../../../editor/arch-file-refresh-policy
 import { globalEventBus } from '../../../../shared/event-bus'
 import { useManuscriptAutomation } from '../../../../services/manuscript-automation'
 import { useBlueprintAutomation } from '../../../../services/blueprint-automation'
+import { useOutlineAutomation } from '../../../../services/outline-automation'
 
 ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -32,7 +33,7 @@ function snapshot<T>(store: StoreApi<T>): () => void {
   const state = store.getState()
   return () => store.setState(state, true)
 }
-const restores = [useProjectStore, useWorkflowStore, useStageStore, useLocaleStore, useLayoutStore, useEditorStore, useManuscriptAutomation, useBlueprintAutomation].map(store => snapshot(store as StoreApi<unknown>))
+const restores = [useProjectStore, useWorkflowStore, useStageStore, useLocaleStore, useLayoutStore, useEditorStore, useManuscriptAutomation, useBlueprintAutomation, useOutlineAutomation].map(store => snapshot(store as StoreApi<unknown>))
 
 let root: Root | undefined
 let host: HTMLDivElement | undefined
@@ -119,6 +120,7 @@ describe('运行侧页', () => {
   it.each([
     { mode: '正文', setActive: (active: boolean) => useManuscriptAutomation.setState({ session, active }) },
     { mode: '蓝图', setActive: (active: boolean) => useBlueprintAutomation.setState({ session, active }) },
+    { mode: '大纲', setActive: (active: boolean) => useOutlineAutomation.setState({ session, active }) },
   ])('$mode自动化跨环节连续执行时不反复读取历史恢复记录，停止后补读一次', async ({ setActive }) => {
     const reads = () => invoke.mock.calls.filter(([channel]) => channel === 'generation:list-recovery')
     setActive(true)

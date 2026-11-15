@@ -20,6 +20,7 @@ import type { GenerationRecoveryList } from '../../shared/generation-owner-contr
 import { throwIfTerminalProviderFailure } from '../../services/generation/generation-harness'
 import { useManuscriptAutomation } from '../../services/manuscript-automation'
 import { useBlueprintAutomation } from '../../services/blueprint-automation'
+import { useOutlineAutomation } from '../../services/outline-automation'
 
 /** 这部作品有工作流正在发生成请求；暂停与等确认的不算。 */
 function workflowWriting(projectPath: string | undefined, runs = useWorkflowStore.getState().activeRuns): boolean {
@@ -71,7 +72,8 @@ export function useRunRecovery(): RunRecovery {
   const session = useMemo(() => projectSessionContextFromProject(project), [project])
   const manuscriptAutomating = useManuscriptAutomation(s => s.active && sameProjectSessionContext(s.session, session))
   const blueprintAutomating = useBlueprintAutomation(s => s.active && sameProjectSessionContext(s.session, session))
-  const automating = manuscriptAutomating || blueprintAutomating
+  const outlineAutomating = useOutlineAutomation(s => s.active && sameProjectSessionContext(s.session, session))
+  const automating = manuscriptAutomating || blueprintAutomating || outlineAutomating
   /** 最近结束的那次运行：历史最多留 50 条，满了以后条数不再变，只能看最前面那条。 */
   const lastEnded = useWorkflowStore(s => s.history[0] ? `${s.history[0].id}:${s.history[0].completedAt ?? ''}` : '')
   const [candidateList, setCandidates] = useState<Loaded<RecoverySources['candidates']>>({ session: null, value: [] })
