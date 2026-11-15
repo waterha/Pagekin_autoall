@@ -1614,6 +1614,8 @@ export class GeneratePlotArchitectureCommand extends BaseWorkflowCommand<string>
       ...(this.options.resumeSynopsis ? { resumeHandle: this.options.resumeHandle } : {}),
         ...(this.options.restartHandle ? { restartHandle: this.options.restartHandle } : {}),
       onRunOpened: async handle => {
+        // Retain the durable identity even when writing navigation fails and runtime setup unwinds.
+        params.context.data.synopsisGenerationHandle = handle
         const session = requireWorkflowProjectSession(params.context)
         const partial = (params.context.data.partial as PartialArchData) || await loadPartialData(this.snapshot.expectedProjectPath, session)
         partial.synopsis_generation_handle = handle

@@ -175,6 +175,49 @@ async function frozenAggregateRun(f: ReturnType<typeof fixture>, selection: Begi
 }
 
 describe('chapter outline main authority', () => {
+  it('大纲自动化保存完整前缀的真实收据并继续缺少章节，不写入半截候选', async () => {
+    const { recoverOutlineAutomation } = await import('../../../src/services/outline-automation-recovery')
+    const { ipc } = await import('../../../src/services/ipc-client')
+    let failSecond = true
+    const dispatch = vi.fn<GenerationRunServiceDependencies['dispatch']>(async (request, options) => {
+      const chapter = Number((request as { task: GenerationTask }).task.purpose.split(':')[2])
+      options.onVisible({ kind: 'delta', text: failSecond && chapter === 2 ? '## 第2章：未完成\n半截候选' : outlineEntry(chapter) })
+      return { finishReason: failSecond && chapter === 2 ? 'length' : 'stop', usage: null }
+    })
+    const f = fixture(dispatch), run = f.owner.begin(outlineSelection(f, 3))
+    await f.owner.execute({ handle: run.handle, invocationNonce: 'one', task: outlineTask(run.plotOutline!) })
+    acceptOutline(f.owner, run.handle)
+    for (const nonce of ['normal-two', 'compact-two']) await f.owner.execute({ handle: run.handle, invocationNonce: nonce, task: outlineTask(f.owner.read(run.handle).plotOutline!) })
+    const bridge = vi.spyOn(ipc, 'invokeWithProjectSession').mockImplementation((async (_session, channel, ...args) => {
+      if (channel === 'generation:read-context') return f.owner.readContext((args[0] as { handle: MainGenerationRunHandle }).handle)
+      if (channel === 'db:project-core-synopsis-commit') {
+        const receipt = f.db.transaction(() => f.owner.commitPlotOutlineAuthorEdit(args[0] as ProjectCoreSynopsisCommitRequest)).immediate()
+        return { success: true, authorEdit: receipt }
+      }
+      throw new Error(`Unexpected test bridge channel: ${channel}`)
+    }) as typeof ipc.invokeWithProjectSession)
+    try {
+      const action = await recoverOutlineAutomation({ projectId: 'project', leaseId: 'epoch-1', projectPath: f.root },
+        f.owner.readContext(run.handle), () => {}, zh => zh)
+      expect(action).toMatchObject({ kind: 'restart', handle: run.handle, range: { from: 2, to: 3 } })
+      expect(ProjectCoreRepository.get(f.db)!.synopsis).toContain(outlineEntry(1))
+      expect(ProjectCoreRepository.get(f.db)!.synopsis).not.toContain('半截候选')
+      expect(dispatch).toHaveBeenCalledTimes(3)
+      const next = f.owner.restart(run.handle, { ...outlineSelection(f, 3, 2), uiActionNonce: 'automated-continuation' })
+      failSecond = false
+      for (const chapter of [2, 3]) {
+        await f.owner.execute({ handle: next.handle, invocationNonce: `continue-${chapter}`, task: outlineTask(f.owner.read(next.handle).plotOutline!) })
+        acceptOutline(f.owner, next.handle)
+      }
+      const final = f.owner.read(next.handle).plotOutline!
+      expect(final.cursor.kind).toBe('complete')
+      expect(final.confirmedPrefix).toBe(outlineEntry(1))
+      expect(final.composition!.text).toContain(outlineEntry(2))
+      expect(final.composition!.text).toContain(outlineEntry(3))
+      expect(dispatch).toHaveBeenCalledTimes(5)
+    } finally { bridge.mockRestore() }
+  })
+
   it.each(['zero-attempt', 'unknown-attempt'] as const)('saves author recovery after %s and freezes the old run without changing its six binding fields or liabilities', async mode => {
     const dispatch = vi.fn<GenerationRunServiceDependencies['dispatch']>(async () => ({ finishReason: null, usage: null }))
     const f = fixture(dispatch), run = f.owner.begin(outlineSelection(f, 3))

@@ -399,6 +399,52 @@ describe('config generation full journey completion contract', () => {
 
 
 describe('恢复按钮确认的运行身份', () => {
+  it('导航保存失败且运行时回退后仍保留准确的大纲运行身份', async () => {
+    const journey = arrangeConfigGenerationJourney([])
+    const handle = { projectId: 'project-A', epoch: 'lease-A', rootActionId: 'root', runId: 'opened-outline' }
+    const view = { handle, status: 'running', nonReplayable: false, artifacts: [],
+      budget: { maxAttempts: 32, maxRequestedOutputTokens: 2097152, maxRequestedOutputTokensPerAttempt: 32768, deadlineAt: 9999999999999 } }
+    journey.invoke.mockImplementation(async channel => {
+      if (channel === 'generation:begin' || channel === 'generation:pause') return view
+      if (channel === 'fs:read-json') return { success: false }
+      if (channel === 'fs:mkdir') return { success: true }
+      if (channel === 'fs:write-json') return { success: false, error: 'SQLITE_BUSY' }
+      throw new Error('不应触达后续通道：' + channel)
+    })
+    const workflow = createArchitectureWorkflow({ projectPath: 'C:/projects/A',
+      projectSession: { projectId: 'project-A', leaseId: 'lease-A', projectPath: 'C:/projects/A' },
+      selectedSteps: ['synopsis'], synopsisRange: { from: 1, to: 5 } })
+    const context = { runId: 'automation', projectPath: 'C:/projects/A', projectSession: workflow.projectSession,
+      writingLanguage: 'zh-CN' as const, uiLocale: 'zh-CN' as const, data: {}, cancelled: false }
+    await expect(workflow.steps[0].executor({ id: 'synopsis', name: '', description: '', status: 'running', logs: [] }, context,
+      { log: vi.fn(), setProgress: vi.fn(), appendText: vi.fn() })).rejects.toThrow('SQLITE_BUSY')
+    expect(context.data).toHaveProperty('synopsisGenerationHandle', handle)
+    expect(context).not.toHaveProperty('mainGenerationRunHandle', handle)
+  })
+
+  it.each([true, false])('导航缺失时只允许明确捕获且经主进程校验的运行恢复（当前租约%s）', async current => {
+    const journey = arrangeConfigGenerationJourney([])
+    const expected = { projectId: 'project-A', epoch: '旧会话', rootActionId: 'root', runId: 'captured' }
+    journey.invoke.mockImplementation(async channel => {
+      if (channel === 'fs:read-json') return { success: false }
+      if (channel === 'generation:read-context') return { handle: expected, plotOutline: { range: { from: 1, to: 5 } },
+        plotOutlineRecovery: { leaseEpoch: current ? 'lease-A' : 'expired' } }
+      throw new Error('不应触达后续通道：' + channel)
+    })
+    const executeCommand = vi.spyOn(GeneratePlotArchitectureCommand.prototype, 'execute').mockResolvedValue('恢复成功')
+    try {
+      const workflow = createArchitectureWorkflow({ projectPath: 'C:/projects/A',
+        projectSession: { projectId: 'project-A', leaseId: 'lease-A', projectPath: 'C:/projects/A' },
+        resumeSynopsis: true, expectedRecoveryHandle: expected, recoverMissingSynopsisNavigation: true })
+      const result = workflow.steps[0].executor({ id: 'synopsis', name: '', description: '', status: 'running', logs: [] },
+        { runId: 'automation', projectPath: 'C:/projects/A', projectSession: workflow.projectSession,
+          writingLanguage: 'zh-CN', uiLocale: 'zh-CN', data: {}, cancelled: false },
+        { log: vi.fn(), setProgress: vi.fn(), appendText: vi.fn() })
+      if (current) { await expect(result).resolves.toBe('恢复成功'); expect(executeCommand).toHaveBeenCalledOnce() }
+      else { await expect(result).rejects.toThrow('缺少可恢复'); expect(executeCommand).not.toHaveBeenCalled() }
+    } finally { executeCommand.mockRestore() }
+  })
+
   it.each(['worldbuilding', 'synopsis'] as const)('在 %s 检查点换成另一运行后拒绝续写', async kind => {
     const journey = arrangeConfigGenerationJourney([])
     const expected = { projectId: 'project-A', epoch: '原会话', rootActionId: '原作者动作', runId: '已确认候选运行' }

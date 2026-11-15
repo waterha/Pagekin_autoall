@@ -22,7 +22,7 @@ beforeEach(async () => {
   vi.clearAllMocks()
   useLocaleStore.setState({ locale: 'zh-CN' })
   useProjectStore.setState({ currentProject: { id: session.projectId, sessionLease: session.leaseId, path: session.projectPath } as ProjectData })
-  useOutlineAutomation.setState({ session: null, active: false, stopping: false, message: '', error: false, startChapter: null, endChapter: null, total: 12 })
+  useOutlineAutomation.setState({ session: null, active: false, stopping: false, message: '', error: false, startChapter: null, endChapter: null, total: 12, phase: 'generating' })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -31,6 +31,13 @@ beforeEach(async () => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove() })
 
 describe('情节大纲自动化入口', () => {
+  it('自动保存、恢复和重试过程直接显示当前操作', async () => {
+    for (const phase of ['saving', 'recovering', 'retrying'] as const) {
+      await act(async () => useOutlineAutomation.setState({ session, active: true, phase, message: `当前操作：${phase}` }))
+      expect(host.querySelector('[role=status]')!.textContent).toBe(`当前操作：${phase}`)
+      expect(host.querySelector('button')!.disabled).toBe(false)
+    }
+  })
   it('一键开启并说明每批5章', async () => {
     expect(host.querySelector('button')!.textContent).toBe('大纲自动化')
     expect(host.textContent).toContain('每批 5 章')

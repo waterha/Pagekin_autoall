@@ -64,6 +64,8 @@ export interface ArchitectureWorkflowParams {
   resumeWorldBuilding?: boolean
   /** The exact run whose confirmed candidate the author selected in the UI. */
   expectedRecoveryHandle?: MainGenerationRunHandle
+  /** Automation captured this exact run even if writing its navigation checkpoint failed. */
+  recoverMissingSynopsisNavigation?: boolean
 }
 
 export interface ConfigGenerationWorkflowParams {
@@ -134,7 +136,14 @@ export function createArchitectureWorkflow(
     const result = await ipc.invokeWithProjectSession(session, 'fs:read-json',
       `${expectedProjectPath}/${CANONICAL_PROJECT_DIRECTORY}/partial_arch.json`, expectedProjectPath)
     const partial = result.success ? result.data : undefined
-    const handle = architectureRecoveryHandle(partial, kind, session.projectId)
+    let handle = architectureRecoveryHandle(partial, kind, session.projectId)
+    if (!handle && kind === 'synopsis' && params.recoverMissingSynopsisNavigation && expectedRecoveryHandle) {
+      const recovered = await ipc.invokeWithProjectSession(session, 'generation:read-context', { handle: expectedRecoveryHandle })
+      if (recovered.plotOutline && recovered.plotOutlineRecovery?.leaseEpoch === session.leaseId
+        && (['projectId', 'epoch', 'rootActionId', 'runId'] as const).every(key => recovered.handle[key] === expectedRecoveryHandle[key])) {
+        handle = architectureRecoveryHandle({ synopsis_incomplete: true, synopsis_generation_handle: recovered.handle }, kind, session.projectId)
+      }
+    }
     if (!handle) throw new Error(text('此候选缺少可恢复的运行记录，请保留或复制候选后重新生成。', 'This candidate has no recoverable run record. Keep or copy it before generating again.'))
     if (expectedRecoveryHandle && (['projectId', 'epoch', 'rootActionId', 'runId'] as const)
       .some(key => handle[key] !== expectedRecoveryHandle[key])) throw new Error(text(
