@@ -340,6 +340,58 @@ describe('generation model connection test failures', () => {
     expect(result.error.replace('{"error":"invalid api key"}', '')).not.toMatch(forbidden)
   })
 
+  it.each([
+    ['en-US', 502, 'upstream gateway', 'Try again later or contact the relay provider'],
+    ['en-US', 503, 'upstream gateway', 'Try again later or contact the relay provider'],
+    ['en-US', 504, 'upstream gateway', 'Try again later or contact the relay provider'],
+    ['zh-CN', 502, '上游网关', '稍后重试或联系中转服务商'],
+    ['zh-CN', 503, '上游网关', '稍后重试或联系中转服务商'],
+    ['zh-CN', 504, '上游网关', '稍后重试或联系中转服务商'],
+  ])('explains a gateway HTTP %s/%s without dumping Cloudflare HTML', async (locale, status, expected, advice) => {
+    mocks.locale = String(locale)
+    mocks.generate.mockResolvedValueOnce({
+      success: false, content: '', finishReason: 'error', error: 'LLM_REQUEST_FAILED',
+      httpFailure: {
+        status,
+        body: '<!DOCTYPE html><html><head><style>hidden-style</style><script>hidden-script()</script></head><body><h1>Bad gateway</h1><p>Cloudflare Ray ID: <strong>9abc1234def05678</strong></p></body></html>',
+      },
+    })
+    const result = await connectionHandler()({}, deepSeekModel) as { success: boolean; error: string }
+    expect(result.success).toBe(false)
+    expect(result.error).toContain(`HTTP ${status}`)
+    expect(result.error).toContain(expected)
+    expect(result.error).toContain(advice)
+    expect(result.error).toContain('Cloudflare Ray ID: 9abc1234def05678')
+    expect(result.error).not.toMatch(/<|>|hidden-script|hidden-style|API Key|API key|model name|模型名/u)
+    expect(result.error.length).toBeLessThan(300)
+  })
+
+  it.each([
+    ['en-US', ' The service returned: '],
+    ['zh-CN', '服务返回：'],
+  ])('limits arbitrary service details to 500 characters in %s', async (locale, separator) => {
+    mocks.locale = locale
+    mocks.generate.mockResolvedValueOnce({
+      success: false, content: '', finishReason: 'error', error: 'LLM_REQUEST_FAILED',
+      httpFailure: { status: 429, body: `  ${'x'.repeat(1200)}  ` },
+    })
+    const result = await connectionHandler()({}, deepSeekModel) as { success: boolean; error: string }
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('HTTP 429')
+    expect(result.error.split(separator)[1]).toBe(`${'x'.repeat(499)}…`)
+  })
+
+  it('omits HTML, script, and style contents for other HTTP statuses', async () => {
+    mocks.locale = 'en-US'
+    mocks.generate.mockResolvedValueOnce({
+      success: false, content: '', finishReason: 'error', error: 'LLM_REQUEST_FAILED',
+      httpFailure: { status: 403, body: '<!DOCTYPE html><style>hidden-style</style><script>hidden-script()</script><p>Access denied</p>' },
+    })
+    const result = await connectionHandler()({}, deepSeekModel) as { success: boolean; error: string }
+    expect(result.error).toContain('Access denied')
+    expect(result.error).not.toMatch(/<|>|hidden-script|hidden-style/u)
+  })
+
   it('names the finish reason when the probe reply was cut short', async () => {
     mocks.locale = 'en-US'
     mocks.generate.mockResolvedValueOnce({ success: false, content: '', finishReason: 'length', error: 'LLM_RESPONSE_INCOMPLETE' })

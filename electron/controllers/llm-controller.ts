@@ -140,13 +140,27 @@ function connectionTestFailure(failure: unknown): string {
 function providerConnectionFailure(response: Extract<LLMResponse, { success: false }>): string | undefined {
   if (response.error === 'LLM_REQUEST_FAILED' && response.httpFailure) {
     const { status, body } = response.httpFailure
+    const safeBody = body
+      .replace(/<(script|style)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, '')
+      .replace(/<[^>]*>/g, ' ')
+      .trim()
+    if ([502, 503, 504].includes(status)) {
+      const advice = mainText(
+        app.getLocale(),
+        `上游网关暂时不可用或超时（HTTP ${status}）。请稍后重试或联系中转服务商。`,
+        `The upstream gateway is temporarily unavailable or timed out (HTTP ${status}). Try again later or contact the relay provider.`,
+      )
+      const rayId = safeBody.match(/Cloudflare Ray ID\s*:\s*([a-f0-9]{16,32})(?![a-z0-9_-])/i)?.[1]
+      return rayId ? `${advice} Cloudflare Ray ID: ${rayId}` : advice
+    }
     const advice = mainText(
       app.getLocale(),
       `模型请求失败（HTTP ${status}）。请检查 Base URL、API Key 与模型名。`,
       `Model request failed (HTTP ${status}). Check the Base URL, API key, and model name.`,
     )
-    return body.trim()
-      ? `${advice}${mainText(app.getLocale(), `服务返回：${body.trim()}`, ` The service returned: ${body.trim()}`)}`
+    const detail = safeBody.length > 500 ? `${safeBody.slice(0, 499)}…` : safeBody
+    return detail
+      ? `${advice}${mainText(app.getLocale(), `服务返回：${detail}`, ` The service returned: ${detail}`)}`
       : advice
   }
   if (response.error === 'LLM_RESPONSE_INCOMPLETE') {
