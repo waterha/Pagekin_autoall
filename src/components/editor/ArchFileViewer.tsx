@@ -20,7 +20,7 @@ import { useProjectStore } from '../../stores/project-store'
 import { useLocaleStore } from '../../stores/locale-store'
 import { launchCreativeWorkflow } from '../../services/workflows/creative-workflow-launcher'
 import { createArchitectureWorkflow } from '../../services/workflows/architecture-workflow'
-import { plotOutlineCommittedRecoverySynopsis, renderPlotOutlineSynopsis, validPlotOutlineAuthorPrefix, type PlotOutlineRangeSource } from '../../shared/plot-outline-contract'
+import { plotOutlineBatchHasCommittable, plotOutlineCommittedRecoverySynopsis, renderPlotOutlineSynopsis, validPlotOutlineAuthorPrefix, type PlotOutlineRangeSource } from '../../shared/plot-outline-contract'
 import { useWorkflowStore } from '../../stores/workflow-store'
 import { outlineProgress } from '../../shared/plot-outline-checkpoint'
 import { archOutlineSource, readArchCheckpoint } from '../../services/architecture-service'
@@ -122,6 +122,7 @@ function ArchFileViewerSession({
   const [authorEnd, setAuthorEnd] = useState(String(recoveryTab?.planningSaveEnd ?? ''))
   const [recoveryError, setRecoveryError] = useState('')
   const [continuing, setContinuing] = useState(false)
+  const [dismissing, setDismissing] = useState(false)
   const recoverySession = useRef(captureProjectSession(currentProject))
   const authorEndRef = useRef(authorEnd)
   const recoveryRef = useRef(recovery)
@@ -268,7 +269,14 @@ function ArchFileViewerSession({
             synopsis = plotOutlineCommittedRecoverySynopsis(synopsis, candidate.draft, progress, committedRange)
               ?? synopsis.trimEnd() + renderPlotOutlineSynopsis('', committedRange.to, expected).slice(title.length)
           }
-          if (!validPlotOutlineAuthorPrefix(synopsis, progress, committedRange)) throw new Error(text('请保留连续完整章节，并移除所选保存终点之后的未完成内容。原有范围外内容须保持不变。', 'Keep complete consecutive chapters and remove incomplete content after the selected ending chapter. Preserve the original content outside this range.'))
+          if (!validPlotOutlineAuthorPrefix(synopsis, progress, committedRange)) {
+            // 这一批一章都没写完时，保存终点只有范围的第一章可选，而那章恰恰是空的：没有任何终点能通过校验。
+            // 这时候说清原因，让作者去继续生成或放弃恢复稿，而不是反复提示去改保存终点。
+            if (!plotOutlineBatchHasCommittable(progress)) throw new Error(text(
+              '这一批没有生成出任何一个完整章节，保存不了。请点「继续生成缺少的章节」重新生成，或放弃这份恢复稿。',
+              'This batch finished no complete chapter, so there is nothing to save. Generate the remaining chapters again, or dismiss this recovery draft.'))
+            throw new Error(text('请保留连续完整章节，并移除所选保存终点之后的未完成内容。原有范围外内容须保持不变。', 'Keep complete consecutive chapters and remove incomplete content after the selected ending chapter. Preserve the original content outside this range.'))
+          }
           submission = {
             ...submittedSnapshot, status: 'pending', channel: 'db:project-core-synopsis-commit',
             request: { synopsis, expected: progress.sourceExpected,
@@ -561,6 +569,22 @@ function ArchFileViewerSession({
     } catch (error) { setRecoveryError(appErrorMessage(useLocaleStore.getState().locale, error)) }
     finally { setContinuing(false) }
   }
+  /** 本批没有可保存的章节时，作者需要一条明确的退路：只记在运行上，正式大纲与草稿原文都不动。 */
+  const dismissRecovery = async () => {
+    if (dismissing) return
+    const session = recoverySession.current
+    const original = recoveryRef.current
+    if (!session || !original || !isProjectSessionCurrent(session)) return
+    setDismissing(true)
+    try {
+      await ipc.invokeWithProjectSession(session, 'generation:dismiss-planning-recovery', { handle: original.handle })
+      if (!isProjectSessionCurrent(session)) return
+      globalEventBus.emit('PLANNING_RECOVERY_CHANGED', { projectSession: session })
+      useEditorStore.getState().closeTab(tabId)
+    } catch (error) {
+      setRecoveryError(appErrorMessage(useLocaleStore.getState().locale, error))
+    } finally { setDismissing(false) }
+  }
   const generated = initialContent.length > 50 && !initialContent.includes('待生成')
 
   const rosterPresentation = stepKey === 'characters'
@@ -697,6 +721,7 @@ function ArchFileViewerSession({
           : text('本次所选章节已保存。', 'The selected chapters are saved.')}</p>
         {recovery.plotOutlineRecovery?.writeState.kind === 'blocked' && <p>{outlineSourceInvalidNote(recovery, locale) ?? outlineSourceChangedNote(recovery, locale) ?? text('生成尚在进行、来源已变化或本稿已保存时，不能覆盖正式内容。草稿仍可编辑和复制。', 'Active generation, changed sources or an already saved draft prevent replacing saved content. You can still edit and copy this draft.')}</p>}
         <button type="button" className="btn-secondary" disabled={continuing || saving || !projectMatches || !recovery.planningContinuation?.remainingRange || !['ready', 'continued'].includes(recovery.planningContinuation.state)} onClick={() => { void continuePlanning() }}>{text('继续生成缺少的章节', 'Generate remaining chapters')}</button>
+        <button type="button" className="btn-secondary" disabled={dismissing || saving || !projectMatches || recovery.planningContinuation?.state === 'in-flight'} onClick={() => { void dismissRecovery() }}>{text('放弃这份恢复稿', 'Dismiss recovery draft')}</button>
         <details><summary>{text('原始候选', 'Original candidate')}</summary><pre className="whitespace-pre-wrap max-h-40 overflow-auto">{recoveryTab?.originalContent}</pre></details>
         {recoveryError && <p role="alert">{recoveryError}</p>}
       </div>}

@@ -401,6 +401,16 @@ export function plotOutlineCommittedRecoverySynopsis(
   }
 }
 
+/**
+ * 这一批有没有至少一个「完整、可提交」的章节：保存终点必须落在本批范围内，而范围的第一章就可能还没写完
+ * （生成被打断，cursor 停在 unknown-completion）。这种时候没有任何合法终点，作者必须先把这一章生成出来，
+ * 或者放弃这份恢复稿——界面要据此外说明，而不是反复报「请保留连续完整章节」。
+ */
+export function plotOutlineBatchHasCommittable(progress: Pick<PlotOutlineProgress, 'range' | 'composition' | 'cursor'>): boolean {
+  const completed = progress.composition?.chapters?.length ?? 0
+  return completed + (progress.cursor.kind === 'accept' ? 1 : 0) > 0
+}
+
 export function plotOutlineSourceInvalid(progress: Pick<PlotOutlineProgress, 'cursor'>): boolean {
   return progress.cursor.kind === 'stopped' && progress.cursor.reason === 'source-invalid'
 }

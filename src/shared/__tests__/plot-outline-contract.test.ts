@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { validPlotOutlineEntry, plotOutlineConfirmedPrefix, plotOutlineRangeEffect, renderPlotOutlineRange, renderPlotOutlineSynopsis, validPlotOutlineAuthorPrefix, isPlotOutlineCoverageNote,
-  plotOutlineCommittedRecoverySynopsis, plotOutlineNextChapter, plotOutlineRequestContract, derivePlotOutlineCursor, plotOutlineRecoveryDraft, PLOT_OUTLINE_CONTENT, PLOT_OUTLINE_PROTOCOL } from '../plot-outline-contract'
+  plotOutlineCommittedRecoverySynopsis, plotOutlineBatchHasCommittable, plotOutlineNextChapter, plotOutlineRequestContract, derivePlotOutlineCursor, plotOutlineRecoveryDraft, PLOT_OUTLINE_CONTENT, PLOT_OUTLINE_PROTOCOL } from '../plot-outline-contract'
 import type { PlotOutlineProgress } from '../plot-outline-contract'
 import { outlineProgress } from '../plot-outline-checkpoint'
 import type { ProjectCoreSynopsisExpected } from '../../../electron/repositories/project-core-repository'
@@ -246,6 +246,24 @@ describe('chapter Markdown outline contract', () => {
       const progress = progressOf({ from: 1, to: 3 }, sourceExpected, '', { kind: 'stopped', chapterNumber: 2, reason: 'attempts-exhausted' }, composition(chapter(1, '雨夜', '找到信件。'), [1]))
       const text = `# 情节大纲\n\n${chapter(1, '雨夜', '找到信件。')}`
       expect(plotOutlineCommittedRecoverySynopsis(text, text, progress, { from: 1, to: 1 })).toBeNull()
+    })
+
+    it('本批一章都没完成时判为无可提交内容：保存终点只剩范围第一章而它正是空的', () => {
+      // 真实案例：范围 116–120，第 116 章生成被打断（cursor 停在 unknown-completion，composition 为空）。
+      // 作者删掉恢复稿里的第 116 章后，committedRange 只能取 116（=range.from），
+      // 但那正是没写完的一章，严格校验永远不通过，界面也没有别的出口。
+      const sourceExpected = expected('')
+      const progress: PlotOutlineProgress = {
+        protocol: PLOT_OUTLINE_PROTOCOL, range: { from: 116, to: 120 }, content: PLOT_OUTLINE_CONTENT, targetUnits: 600,
+        cursor: { kind: 'stopped', chapterNumber: 116, reason: 'unknown-completion' },
+        sourceExpected, confirmedPrefix: '', composition: null,
+      }
+      expect(plotOutlineBatchHasCommittable(progress)).toBe(false)
+      // 只要有一个完整章节（或一个待接受的章节），就有合法终点。
+      expect(plotOutlineBatchHasCommittable({ ...progress, composition: composition(chapter(116, '夜', '正文。'), [116]) })).toBe(true)
+      expect(plotOutlineBatchHasCommittable({ ...progress, cursor: { kind: 'accept', chapterNumber: 116, artifactIds: ['c116'], text: chapter(116, '夜', '正文。') } })).toBe(true)
+      // 反过来：有内容时也不能误判成空批。
+      expect(plotOutlineBatchHasCommittable({ ...progress, composition: composition(chapter(116, '夜', '正文。'), [116, 117]) })).toBe(true)
     })
   })
 

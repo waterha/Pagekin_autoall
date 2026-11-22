@@ -270,6 +270,41 @@ describe('planning recovery editors', () => {
       })
     }
   }
+  it.each(['zh-CN', 'en-US'] as const)('outline recovery draft with no completed chapter in the batch explains why saving is impossible and offers a way out（%s）', async language => {
+    const english = language === 'en-US'
+    if (english) useLocaleStore.setState({ locale: 'en-US' })
+    const title = english ? '# Plot Outline' : '# 情节大纲'
+    const body = english ? '## Chapter 1: Rain\nThe author keeps every clue.' : '## 第1章：雨夜\n作者保留每一条线索。'
+    const placeholder = english ? '## Chapter 2:' : '## 第2章：'
+    const oldTail = english ? '> This outline covers chapters 1-1 of 3; the remaining chapters will be generated in later batches.' : '> 本大纲已覆盖至第 1 章（全书 3 章），其余章节将在后续批次继续生成。'
+    context = fixture('outline')
+    if (!context.plotOutline || !context.plotOutlineRecovery) throw new Error('Missing outline fixture')
+    context.plotOutline.sourceExpected.writingLanguage = language
+    // 真实案例的形状：本批从第 2 章起（正式大纲只写到第 1 章），第 2 章生成被打断，本批没有任何完整章节。
+    context.plotOutline.sourceExpected.synopsis = `${title}\n\n${body}\n\n${oldTail}`
+    context.plotOutline.range = { from: 2, to: 3 }
+    context.plotOutline.confirmedPrefix = body
+    context.plotOutline.composition = null
+    context.plotOutline.cursor = { kind: 'stopped', chapterNumber: 2, reason: 'unknown-completion' }
+    context.plotOutlineRecovery.completeChapters = []
+    const original = `${title}\n\n${body}\n\n${placeholder}\n\n${oldTail}`
+    context.plotOutlineRecovery.draft = original
+    await render('outline')
+    // 作者删掉第 2 章占位、只留下已写好的第 1 章。
+    const authored = `${title}\n\n${body}\n\n${oldTail}`
+    await edit(authored)
+    await act(async () => button(english ? 'Save' : '保存').click())
+    // 本批一章都没完成时，保存终点只能是第 2 章，而作者已经把它删了：没有可提交的内容。
+    // 现在要说明这一点，而不是只给一句「请保留连续完整章节」。
+    expect(savedPayload).toBeUndefined()
+    const alerts = [...container.querySelectorAll('[role="alert"]')].map(node => node.textContent ?? '')
+    expect(alerts.join('\n')).toContain(english ? 'no complete chapter' : '没有生成出任何一个完整章节')
+    // 仍有明确的出路：继续生成缺少的章节，或放弃这份恢复稿。
+    expect(button(english ? 'Generate remaining chapters' : '继续生成缺少的章节').disabled).toBe(false)
+    expect(button(english ? 'Dismiss recovery draft' : '放弃这份恢复稿').disabled).toBe(false)
+    expect(editor().state.doc.toString()).toBe(authored)
+    noModel()
+  })
   it.each(['zh-CN', 'en-US'] as const)('outline recovery draft left with the unfinished chapter after the endpoint still saves the committed prefix（%s）', async language => {
     const english = language === 'en-US'
     const title = english ? '# Plot Outline' : '# 情节大纲'
