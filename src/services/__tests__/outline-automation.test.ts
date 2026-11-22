@@ -79,7 +79,7 @@ const runAutomation = async () => {
   await running
 }
 
-function seedExhaustedRecovery(accepted = 2) {
+function seedExhaustedRecovery(accepted = 2, reason: 'attempts-exhausted' | 'unknown-completion' = 'attempts-exhausted') {
   checkpoint = { synopsis_incomplete: true, synopsis_protocol: PLOT_OUTLINE_PROTOCOL,
     synopsis_generation_handle: recoveryHandle, synopsis_range: { from: 1, to: 5 } }
   const sourceExpected = { ...core, wordsPerChapter: 1800, genre: '', plotStructure: 'three_act', narrativePov: 'third_limited', globalGuidance: '' }
@@ -89,7 +89,7 @@ function seedExhaustedRecovery(accepted = 2) {
     planningDraft: { standing: 'open', createdAtMs: 1, requestedRange: { from: 1, to: 5 } },
     planningContinuation: { state: accepted ? 'save-prefix' : 'ready', sourceHandle: recoveryHandle, remainingRange: { from: 1, to: 5 }, targetUnits: 700 },
     plotOutline: { range: { from: 1, to: 5 }, protocol: PLOT_OUTLINE_PROTOCOL, content: { maxAttemptsPerChapter: 2 }, targetUnits: 700,
-      cursor: { kind: 'stopped', chapterNumber: accepted + 1, reason: 'attempts-exhausted' }, sourceExpected, confirmedPrefix: '',
+      cursor: { kind: 'stopped', chapterNumber: accepted + 1, reason }, sourceExpected, confirmedPrefix: '',
       composition: accepted ? { algorithm: PLOT_OUTLINE_PROTOCOL, text: outlineBody(accepted), textHash: 'hash', artifactIds: ['accepted'], sources: [],
         chapters: Array.from({ length: accepted }, (_, index) => ({ chapterNumber: index + 1, artifactIds: ['accepted'], textHash: 'hash' })) } : null },
     plotOutlineRecovery: { sourceHandle: recoveryHandle, leaseEpoch: session.leaseId, completeChapters: Array.from({ length: accepted }, (_, index) => index + 1),
@@ -132,6 +132,79 @@ describe('情节大纲自动化', () => {
     expect(useOutlineAutomation.getState().error).toBe(false)
   })
 
+  // 真实案例（第 129 章）：调用 49ms 就被服务商拒绝，尝试停在 unknown-completion。
+  // 恢复稿里已经有完整章节，但自动化只认 attempts-exhausted，于是直接抛错卡住，
+  // 只能靠人工点「继续生成缺少的章节」。自动化必须自己走这条路。
+  it('恢复稿停在 unknown-completion 时也保存完整前缀并继续生成缺少的章节', async () => {
+    seedExhaustedRecovery(2, 'unknown-completion')
+    await runAutomation()
+    const saves = mocks.invoke.mock.calls.filter(call => call[1] === 'db:project-core-synopsis-commit')
+    expect(saves).toHaveLength(1)
+    expect(saves[0][2]).toMatchObject({ authorRecovery: { committedRange: { from: 1, to: 2 } } })
+    expect(saves[0][2].synopsis).not.toContain('未完成')
+    expect(mocks.generate.mock.calls[0][2]).toMatchObject({ restartHandle: recoveryHandle, synopsisRange: { from: 3, to: 5 } })
+    expect(useOutlineAutomation.getState().error).toBe(false)
+  })
+
+  it('unknown-completion 且本批一章都没完成时，直接从本批起点重新生成而不是卡住', async () => {
+    seedExhaustedRecovery(0, 'unknown-completion')
+    await runAutomation()
+    expect(mocks.invoke.mock.calls.some(call => call[1] === 'db:project-core-synopsis-commit')).toBe(false)
+    expect(mocks.generate.mock.calls[0][2]).toMatchObject({ restartHandle: recoveryHandle, synopsisRange: { from: 1, to: 5 } })
+    expect(useOutlineAutomation.getState().error).toBe(false)
+  })
+
+  // 现场数据：第 129 章调用 49ms 被服务商拒绝，游标停在 unknown-completion，范围 129–133，正式大纲写到 128。
+  it('第 129 章 unknown-completion 的真实形状：保存本批已完成的前缀后只重生成缺少的章节', async () => {
+    // 现场是 200 章的长篇；fixture 默认 12 章，先按实现的章数铺好已保存的前缀。
+    core.totalChapters = 200
+    useProjectStore.setState({ currentProject: { ...useProjectStore.getState().currentProject!,
+      novelConfig: { ...useProjectStore.getState().currentProject!.novelConfig, totalChapters: 200 } } })
+    saveThrough(128)
+    checkpoint = { synopsis_incomplete: true, synopsis_protocol: PLOT_OUTLINE_PROTOCOL,
+      synopsis_generation_handle: recoveryHandle, synopsis_range: { from: 129, to: 133 }, synopsis_covered_to: 128 }
+    const sourceExpected = { ...core, wordsPerChapter: 1800, genre: '', plotStructure: 'three_act', narrativePov: 'third_limited', globalGuidance: '' }
+    const acceptedBody = Array.from({ length: 2 }, (_, index) =>
+      `## 第${129 + index}章：新的发现\n主角在调查失踪事件时发现新的线索，作出选择并付出代价，前往下一个目标。`).join('\n\n')
+    recoveryContext = {
+      handle: recoveryHandle, operation: 'generate-plot-outline', modelId: 'planner', authorInputs: [], selectedDraftIds: [], selectedFinalizedDraftIds: [],
+      selectedBlueprintChapterNumbers: [], composition: null, lastCompositionFinishReason: 'length', attemptedPurposes: [], draftSave: { kind: 'absent' },
+      planningDraft: { standing: 'open', createdAtMs: 1, requestedRange: { from: 129, to: 133 } },
+      planningContinuation: { state: 'save-prefix', sourceHandle: recoveryHandle, remainingRange: { from: 129, to: 133 }, targetUnits: 700 },
+      plotOutline: { range: { from: 129, to: 133 }, protocol: PLOT_OUTLINE_PROTOCOL, content: { maxAttemptsPerChapter: 2 }, targetUnits: 700,
+        cursor: { kind: 'stopped', chapterNumber: 131, reason: 'unknown-completion' }, sourceExpected, confirmedPrefix: '',
+        composition: { algorithm: PLOT_OUTLINE_PROTOCOL, text: acceptedBody, textHash: 'hash', artifactIds: ['accepted'], sources: [],
+          chapters: [{ chapterNumber: 129, artifactIds: ['accepted'], textHash: 'hash' }, { chapterNumber: 130, artifactIds: ['accepted'], textHash: 'hash' }] } },
+      plotOutlineRecovery: { sourceHandle: recoveryHandle, leaseEpoch: session.leaseId, completeChapters: [129, 130],
+        draft: `${acceptedBody}\n## 第131章：未完成\n`, writeState: { kind: 'ready' }, saved: null, inFormalOutline: false },
+    }
+    const invoke = mocks.invoke.getMockImplementation()!
+    mocks.invoke.mockImplementation(async (owner, channel, ...args) => {
+      if (channel === 'db:project-core-synopsis-commit') {
+        const request = args[0]
+        core.synopsis = request.synopsis
+        recoveryContext!.plotOutlineRecovery!.saved = { kind: 'author-edit', ...request.authorRecovery,
+          requestedRange: { from: 129, to: 133 }, remainingRange: { from: 131, to: 133 }, synopsisHash: 'saved', payloadHash: 'payload', idempotent: false }
+        recoveryContext!.plotOutlineRecovery!.writeState = { kind: 'blocked', reason: 'author-saved' }
+        recoveryContext!.plotOutlineRecovery!.completeChapters = []
+        recoveryContext!.plotOutline!.composition = null
+        recoveryContext!.plotOutline!.cursor = { kind: 'stopped', chapterNumber: 131, reason: 'unknown-completion' }
+        recoveryContext!.planningContinuation = { state: 'ready', sourceHandle: recoveryHandle, remainingRange: { from: 131, to: 133 }, targetUnits: 700 }
+        return { success: true }
+      }
+      return invoke(owner, channel, ...args)
+    })
+    await runAutomation()
+    const saves = mocks.invoke.mock.calls.filter(call => call[1] === 'db:project-core-synopsis-commit')
+    expect(saves).toHaveLength(1)
+    expect(saves[0][2]).toMatchObject({ authorRecovery: { committedRange: { from: 129, to: 130 } } })
+    expect(saves[0][2].synopsis).toContain('第130章')
+    expect(saves[0][2].synopsis).not.toContain('第131章')
+    // 本批 129–130 已保存，接着只生成缺少的 131–133。
+    expect(ranges()[0]).toEqual({ from: 131, to: 133 })
+    expect(useOutlineAutomation.getState().error).toBe(false)
+  })
+
   it('保存成功但响应丢失时重新核对收据，不重复写入前缀', async () => {
     seedExhaustedRecovery()
     const invoke = mocks.invoke.getMockImplementation()!
@@ -170,6 +243,60 @@ describe('情节大纲自动化', () => {
     expect(saves).toHaveLength(2)
     expect(saves[0][2]).toEqual(saves[1][2])
     expect(useOutlineAutomation.getState().error).toBe(false)
+  })
+
+  // 现场：架构工作流先抛「第 129 章已停止自动生成，原因 unknown-completion」，
+  // 自动化必须接住它、保存已完成的章，再继续生成，而不是把这句话当成终点停下来。
+  it('工作流报 unknown-completion 停止时自动接住，保存已完成章后继续，不卡死', async () => {
+    core.totalChapters = 200
+    useProjectStore.setState({ currentProject: { ...useProjectStore.getState().currentProject!,
+      novelConfig: { ...useProjectStore.getState().currentProject!.novelConfig, totalChapters: 200 } } })
+    saveThrough(128)
+    const acceptedBody = Array.from({ length: 2 }, (_, index) =>
+      `## 第${129 + index}章：新的发现\n主角在调查失踪事件时发现新的线索，作出选择并付出代价，前往下一个目标。`).join('\n\n')
+    const sourceExpected = { ...core, wordsPerChapter: 1800, genre: '', plotStructure: 'three_act', narrativePov: 'third_limited', globalGuidance: '' }
+    // 第一次生成跑到第 131 章被服务商拒绝：工作流抛出停止错误，检查点留下 unknown-completion。
+    mocks.generate.mockImplementationOnce(async (_selected, _snapshot, _options, input) => {
+      checkpoint = { synopsis_incomplete: true, synopsis_protocol: PLOT_OUTLINE_PROTOCOL,
+        synopsis_generation_handle: recoveryHandle, synopsis_range: { from: 129, to: 133 }, synopsis_covered_to: 128 }
+      input.context.data.synopsisGenerationHandle = recoveryHandle
+      recoveryContext = {
+        handle: recoveryHandle, operation: 'generate-plot-outline', modelId: 'planner', authorInputs: [], selectedDraftIds: [], selectedFinalizedDraftIds: [],
+        selectedBlueprintChapterNumbers: [], composition: null, lastCompositionFinishReason: 'error', attemptedPurposes: [], draftSave: { kind: 'absent' },
+        planningDraft: { standing: 'open', createdAtMs: 1, requestedRange: { from: 129, to: 133 } },
+        planningContinuation: { state: 'save-prefix', sourceHandle: recoveryHandle, remainingRange: { from: 129, to: 133 }, targetUnits: 700 },
+        plotOutline: { range: { from: 129, to: 133 }, protocol: PLOT_OUTLINE_PROTOCOL, content: { maxAttemptsPerChapter: 2 }, targetUnits: 700,
+          cursor: { kind: 'stopped', chapterNumber: 131, reason: 'unknown-completion' }, sourceExpected, confirmedPrefix: '',
+          composition: { algorithm: PLOT_OUTLINE_PROTOCOL, text: acceptedBody, textHash: 'hash', artifactIds: ['accepted'], sources: [],
+            chapters: [{ chapterNumber: 129, artifactIds: ['accepted'], textHash: 'hash' }, { chapterNumber: 130, artifactIds: ['accepted'], textHash: 'hash' }] } },
+        plotOutlineRecovery: { sourceHandle: recoveryHandle, leaseEpoch: session.leaseId, completeChapters: [129, 130],
+          draft: `${acceptedBody}\n## 第131章：未完成\n`, writeState: { kind: 'ready' }, saved: null, inFormalOutline: false },
+      }
+      throw new Error('第 131 章已停止自动生成，原因 unknown-completion。已接受前缀和全部候选已保留，正式大纲未被覆盖。')
+    })
+    const invoke = mocks.invoke.getMockImplementation()!
+    mocks.invoke.mockImplementation(async (owner, channel, ...args) => {
+      if (channel === 'db:project-core-synopsis-commit') {
+        const request = args[0]
+        core.synopsis = request.synopsis
+        recoveryContext!.plotOutlineRecovery!.saved = { kind: 'author-edit', ...request.authorRecovery,
+          requestedRange: { from: 129, to: 133 }, remainingRange: { from: 131, to: 133 }, synopsisHash: 'saved', payloadHash: 'payload', idempotent: false }
+        recoveryContext!.plotOutlineRecovery!.writeState = { kind: 'blocked', reason: 'author-saved' }
+        recoveryContext!.plotOutlineRecovery!.completeChapters = []
+        recoveryContext!.plotOutline!.composition = null
+        recoveryContext!.plotOutline!.cursor = { kind: 'stopped', chapterNumber: 131, reason: 'unknown-completion' }
+        recoveryContext!.planningContinuation = { state: 'ready', sourceHandle: recoveryHandle, remainingRange: { from: 131, to: 133 }, targetUnits: 700 }
+        return { success: true }
+      }
+      return invoke(owner, channel, ...args)
+    })
+    await runAutomation()
+    // 已完成的 129–130 被保存，之后从 131 接着生成，自动化没有停在 unknown-completion 上。
+    const saves = mocks.invoke.mock.calls.filter(call => call[1] === 'db:project-core-synopsis-commit')
+    expect(saves).toHaveLength(1)
+    expect(saves[0][2]).toMatchObject({ authorRecovery: { committedRange: { from: 129, to: 130 } } })
+    expect(ranges().some(range => range.from === 131)).toBe(true)
+    expect(useOutlineAutomation.getState().message).not.toContain('unknown-completion')
   })
 
   it('恢复稿已在正式大纲保存但工作流报错时不重新生成同一批', async () => {

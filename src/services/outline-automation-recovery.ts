@@ -92,7 +92,11 @@ export async function recoverOutlineAutomation(
       return { kind: 'resume', handle: context.handle, range: progress.range }
     }
     if (!recovery.saved) {
-      if (progress.cursor.kind !== 'stopped' || progress.cursor.reason !== 'attempts-exhausted') {
+      // attempts-exhausted：两次尝试都没写出可接受的章。
+      // unknown-completion：调用中断或服务商拒绝（例如 49ms 就返回错误），游标同样停在某一章，但前面已完成的章是可信的。
+      // 两者都只提交「已经完整接受」的章节；没有任何完整章节时落到下面按 remainingRange 从本批起点重来。
+      if (progress.cursor.kind !== 'stopped'
+        || (progress.cursor.reason !== 'attempts-exhausted' && progress.cursor.reason !== 'unknown-completion')) {
         throw new OutlineRecoveryBlocked(text('本次生成的完成状态不明确，已保留恢复稿，请检查后继续。', 'This generation has an uncertain completion state. Its recovery draft was preserved; check it before continuing.'))
       }
       const chapters = progress.composition?.chapters ?? []
