@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { validPlotOutlineEntry, plotOutlineConfirmedPrefix, plotOutlineRangeEffect, renderPlotOutlineRange, renderPlotOutlineSynopsis, validPlotOutlineAuthorPrefix, isPlotOutlineCoverageNote,
-  plotOutlineNextChapter, plotOutlineRequestContract, derivePlotOutlineCursor, plotOutlineRecoveryDraft, PLOT_OUTLINE_CONTENT, PLOT_OUTLINE_PROTOCOL } from '../plot-outline-contract'
+  plotOutlineCommittedRecoverySynopsis, plotOutlineNextChapter, plotOutlineRequestContract, derivePlotOutlineCursor, plotOutlineRecoveryDraft, PLOT_OUTLINE_CONTENT, PLOT_OUTLINE_PROTOCOL } from '../plot-outline-contract'
+import type { PlotOutlineProgress } from '../plot-outline-contract'
 import { outlineProgress } from '../plot-outline-checkpoint'
 import type { ProjectCoreSynopsisExpected } from '../../../electron/repositories/project-core-repository'
 import { synopsisForDraftChapter } from '../../services/workflows/commands/generate-draft.command'
@@ -196,6 +197,56 @@ describe('chapter Markdown outline contract', () => {
       `${confirmedPrefix.replace('保留原章', '替换原章')}\n\n${authored}`, `${confirmedPrefix}\n\n${authored}\n\n## 第4章：越界\n未来。`]) {
       expect(validPlotOutlineAuthorPrefix(renderPlotOutlineSynopsis(body, 2, expected), progress, { from: 2, to: 2 })).toBe(false)
     }
+  })
+
+  describe('恢复稿按保存终点重建已提交的前缀', () => {
+    const expected = (synopsis: string) => ({ synopsis, premise: '前提', charactersArch: '角色', worldbuilding: '世界',
+      genre: '悬疑', totalChapters: 3, wordsPerChapter: 2000, writingLanguage: 'zh-CN' as const, plotStructure: 'three_act', narrativePov: 'third_limited', globalGuidance: '' })
+    const chapter = (n: number, title: string, body: string) => `## 第${n}章：${title}\n${body}`
+    const note = (n: number) => `> 本大纲已覆盖至第 ${n} 章（全书 3 章），其余章节将在后续批次继续生成。`
+    const composition = (text: string, chapters: number[]) => ({ algorithm: 'chapter-outline-v3' as const, text, textHash: 'a'.repeat(64), artifactIds: chapters.map(n => `c${n}`), sources: [],
+      chapters: chapters.map(n => ({ chapterNumber: n, artifactIds: [`c${n}`], textHash: 'a'.repeat(64) })) })
+    const progressOf = (range: { from: number; to: number }, sourceExpected: ProjectCoreSynopsisExpected, confirmedPrefix: string,
+      cursor: { kind: 'stopped'; chapterNumber: number; reason: 'attempts-exhausted' }, compositionText: ReturnType<typeof composition>): PlotOutlineProgress => ({
+      protocol: PLOT_OUTLINE_PROTOCOL, range, content: PLOT_OUTLINE_CONTENT, targetUnits: 600, cursor, sourceExpected, confirmedPrefix, composition: compositionText,
+    })
+
+    it('应用写的未完成章留在保存终点之后时，按终点重建前缀，不再一直报错', () => {
+      const sourceExpected = expected('')
+      const progress = progressOf({ from: 1, to: 3 }, sourceExpected, '', { kind: 'stopped', chapterNumber: 2, reason: 'attempts-exhausted' }, composition(chapter(1, '雨夜', '找到信件。'), [1]))
+      const draft = plotOutlineRecoveryDraft(progress)
+      expect(draft).toBe(`# 情节大纲\n\n${chapter(1, '雨夜', '找到信件。')}\n\n## 第2章：\n\n${note(2)}`)
+      const rebuilt = plotOutlineCommittedRecoverySynopsis(draft, draft, progress, { from: 1, to: 1 })
+      expect(rebuilt).toBe(`# 情节大纲\n\n${chapter(1, '雨夜', '找到信件。')}\n\n${note(1)}`)
+      expect(validPlotOutlineAuthorPrefix(rebuilt!, progress, { from: 1, to: 1 })).toBe(true)
+    })
+
+    it('正式大纲在整批范围之外的后续章节原样保留在末尾', () => {
+      const sourceExpected = expected(`# 情节大纲\n\n${chapter(1, '旧一', '旧事。')}\n\n${chapter(2, '旧二', '旧事。')}\n\n${chapter(3, '旧三', '旧事。')}\n\n${note(3)}`)
+      const progress = progressOf({ from: 1, to: 2 }, sourceExpected, '', { kind: 'stopped', chapterNumber: 2, reason: 'attempts-exhausted' }, composition(chapter(1, '新一', '新事。'), [1]))
+      const draft = plotOutlineRecoveryDraft(progress)
+      const rebuilt = plotOutlineCommittedRecoverySynopsis(draft, draft, progress, { from: 1, to: 1 })
+      expect(rebuilt).toBe(`# 情节大纲\n\n${chapter(1, '新一', '新事。')}\n\n${chapter(2, '旧二', '旧事。')}\n\n${chapter(3, '旧三', '旧事。')}\n\n${note(3)}`)
+      expect(validPlotOutlineAuthorPrefix(rebuilt!, progress, { from: 1, to: 1 })).toBe(true)
+    })
+
+    it('作者改过保存终点之前的正式章节、或给范围外的未完成章补了字时拒绝重建，不替作者丢字', () => {
+      const confirmedPrefix = chapter(1, '确认', '保留。')
+      const sourceExpected = expected(`# 情节大纲\n\n${confirmedPrefix}\n\n${chapter(2, '旧二', '旧事。')}\n\n${chapter(3, '旧三', '旧事。')}\n\n${note(3)}`)
+      const progress = progressOf({ from: 2, to: 3 }, sourceExpected, confirmedPrefix, { kind: 'stopped', chapterNumber: 3, reason: 'attempts-exhausted' }, composition(chapter(2, '新二', '新事。'), [2]))
+      const draft = plotOutlineRecoveryDraft(progress)
+      expect(plotOutlineCommittedRecoverySynopsis(draft, draft, progress, { from: 2, to: 2 }))
+        .toBe(`# 情节大纲\n\n${confirmedPrefix}\n\n${chapter(2, '新二', '新事。')}\n\n${chapter(3, '旧三', '旧事。')}\n\n${note(3)}`)
+      expect(plotOutlineCommittedRecoverySynopsis(draft.replace('保留。', '被改过。'), draft, progress, { from: 2, to: 2 })).toBeNull()
+      expect(plotOutlineCommittedRecoverySynopsis(draft.replace('## 第3章：', '## 第3章：作者补写。'), draft, progress, { from: 2, to: 2 })).toBeNull()
+    })
+
+    it('保存终点之后没有章时不重建（本来就已满足，交回校验）', () => {
+      const sourceExpected = expected('')
+      const progress = progressOf({ from: 1, to: 3 }, sourceExpected, '', { kind: 'stopped', chapterNumber: 2, reason: 'attempts-exhausted' }, composition(chapter(1, '雨夜', '找到信件。'), [1]))
+      const text = `# 情节大纲\n\n${chapter(1, '雨夜', '找到信件。')}`
+      expect(plotOutlineCommittedRecoverySynopsis(text, text, progress, { from: 1, to: 1 })).toBeNull()
+    })
   })
 
   describe('只有序章时开头的标准标题与末尾旧覆盖说明（#418）', () => {

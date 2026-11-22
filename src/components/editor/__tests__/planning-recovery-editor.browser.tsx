@@ -270,6 +270,31 @@ describe('planning recovery editors', () => {
       })
     }
   }
+  it.each(['zh-CN', 'en-US'] as const)('outline recovery draft left with the unfinished chapter after the endpoint still saves the committed prefix（%s）', async language => {
+    const english = language === 'en-US'
+    const title = english ? '# Plot Outline' : '# 情节大纲'
+    const body = english ? '## Chapter 1: Rain\nThe author keeps every clue.' : '## 第1章：雨夜\n作者保留每一条线索。'
+    const placeholder = english ? '## Chapter 2:' : '## 第2章：'
+    const oldTail = english ? '> This outline covers chapters 1-2 of 3; the remaining chapters will be generated in later batches.' : '> 本大纲已覆盖至第 2 章（全书 3 章），其余章节将在后续批次继续生成。'
+    const newTail = english ? '> This outline covers chapters 1-1 of 3; the remaining chapters will be generated in later batches.' : '> 本大纲已覆盖至第 1 章（全书 3 章），其余章节将在后续批次继续生成。'
+    context = fixture('outline')
+    if (!context.plotOutline || !context.plotOutlineRecovery) throw new Error('Missing outline fixture')
+    context.plotOutline.sourceExpected.writingLanguage = language
+    context.plotOutline.composition = { algorithm: 'chapter-outline-v3', text: body, textHash: 'a'.repeat(64), artifactIds: ['chapter-1'], sources: [], chapters: [{ chapterNumber: 1, artifactIds: ['chapter-1'], textHash: 'a'.repeat(64) }] }
+    context.plotOutline.cursor = { kind: 'stopped', chapterNumber: 2, reason: 'attempts-exhausted' }
+    context.plotOutlineRecovery.completeChapters = [1]
+    const prefix = `${title}\n\n${body}`
+    // 恢复稿按整批范围渲染，正文里带着这一批还没写完的章节，作者不做任何修改直接保存。
+    const original = `${prefix}\n\n${placeholder}\n\n${oldTail}`
+    context.plotOutlineRecovery.draft = original
+    await render('outline')
+    await act(async () => button('保存').click())
+    const expected = `${prefix}\n\n${newTail}`
+    expect(savedPayload).toMatchObject({ synopsis: expected, expected: context.plotOutline.sourceExpected, authorRecovery: { committedRange: { from: 1, to: 1 } } })
+    expect(useEditorStore.getState().tabs[0]).toMatchObject({ content: expected, savedContent: expected, originalContent: original, dirty: false })
+    expect(editor().state.doc.toString()).toBe(expected)
+    noModel()
+  })
   it('outline author tail preserves an edited quotation instead of treating it as machine progress', async () => {
     context = fixture('outline')
     const authored = '# 情节大纲\n\n## 第1章：雨夜\n作者正文。\n\n> 本大纲已覆盖至第 2 章（全书 3 章），其余章节将在后续批次继续生成。作者要求保留。'

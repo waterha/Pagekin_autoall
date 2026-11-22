@@ -20,7 +20,7 @@ import { useProjectStore } from '../../stores/project-store'
 import { useLocaleStore } from '../../stores/locale-store'
 import { launchCreativeWorkflow } from '../../services/workflows/creative-workflow-launcher'
 import { createArchitectureWorkflow } from '../../services/workflows/architecture-workflow'
-import { renderPlotOutlineSynopsis, validPlotOutlineAuthorPrefix, type PlotOutlineRangeSource } from '../../shared/plot-outline-contract'
+import { plotOutlineCommittedRecoverySynopsis, renderPlotOutlineSynopsis, validPlotOutlineAuthorPrefix, type PlotOutlineRangeSource } from '../../shared/plot-outline-contract'
 import { useWorkflowStore } from '../../stores/workflow-store'
 import { outlineProgress } from '../../shared/plot-outline-checkpoint'
 import { archOutlineSource, readArchCheckpoint } from '../../services/architecture-service'
@@ -263,7 +263,10 @@ function ArchFileViewerSession({
             const generatedTo = Math.min(progress.range.from + (progress.composition?.chapters?.length ?? 0), progress.range.to)
             const oldTail = renderPlotOutlineSynopsis('', generatedTo, expected).slice(title.length)
             if (oldTail && candidate.draft.endsWith(oldTail) && synopsis.endsWith(oldTail)) synopsis = synopsis.slice(0, -oldTail.length)
-            synopsis = synopsis.trimEnd() + renderPlotOutlineSynopsis('', committedRange.to, expected).slice(title.length)
+            // 恢复稿是按整批范围渲染的，正文末尾还留着这一批没写完的那一章；作者把保存终点停在最后一个完整章时，
+            // 这段范围外的内容不能带进正式大纲，按保存终点裁掉重建。
+            synopsis = plotOutlineCommittedRecoverySynopsis(synopsis, candidate.draft, progress, committedRange)
+              ?? synopsis.trimEnd() + renderPlotOutlineSynopsis('', committedRange.to, expected).slice(title.length)
           }
           if (!validPlotOutlineAuthorPrefix(synopsis, progress, committedRange)) throw new Error(text('请保留连续完整章节，并移除所选保存终点之后的未完成内容。原有范围外内容须保持不变。', 'Keep complete consecutive chapters and remove incomplete content after the selected ending chapter. Preserve the original content outside this range.'))
           submission = {

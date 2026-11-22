@@ -362,6 +362,45 @@ export function validPlotOutlineAuthorPrefix(synopsis: string, progress: Pick<Pl
     && renderPlotOutlineRange(authored, range, expected) === synopsis
 }
 
+/**
+ * 恢复稿按整批范围渲染，正文里会保留这一批没写完的那一章（见 plotOutlineRecoveryDraft）。作者把「保存到第几章」停在最后一个完整章时，
+ * 这段范围外的内容不能带进正式大纲，严格校验因此一直不通过，作者只能手工删掉它。这里按保存终点重建：保存终点之前的正文逐字保留，
+ * 保存终点之外的内容一律取自冻结来源（正式大纲已有的后续章节与覆盖说明），应用写的未完成章节不再带入。
+ * 已确认的原文与范围外的段落被作者改过（范围外只允许从末尾删）、或作者自己加了范围外的章时返回 null，交回界面报错，不替作者丢字。
+ */
+export function plotOutlineCommittedRecoverySynopsis(
+  synopsis: string,
+  draft: string,
+  progress: Pick<PlotOutlineProgress, 'range' | 'sourceExpected' | 'confirmedPrefix'>,
+  range: PlotOutlineRange,
+): string | null {
+  const expected = progress.sourceExpected
+  const source = stripStaleCoverageNotes(synopsis.trimEnd())
+  const cleanDraft = stripStaleCoverageNotes(draft.trimEnd())
+  const entries = headings(source)
+  const cut = entries.find(entry => entry.from > range.to)
+  const first = entries.find(entry => entry.from >= range.from && entry.from <= range.to)
+  if (!cut || !first) return null
+  const draftEntries = headings(cleanDraft)
+  const draftFirst = draftEntries.find(entry => entry.from >= range.from && entry.from <= range.to)
+  const draftCut = draftEntries.find(entry => entry.from > range.to)
+  if (!draftFirst || !draftCut) return null
+  if (cleanDraft.slice(0, draftFirst.index).trimEnd() !== source.slice(0, first.index).trimEnd()) return null
+  if (!cleanDraft.slice(draftCut.index).startsWith(source.slice(cut.index))) return null
+  // 正式大纲在整批范围之外的后续章节原样留在末尾，作者动过它们时同样不替作者丢字（末尾覆盖说明先去掉再比）。
+  const beyond = headings(expected.synopsis).find(entry => entry.from > progress.range.to)
+  if (beyond) {
+    const formalTail = stripStaleCoverageNotes(expected.synopsis.slice(beyond.index).trimEnd())
+    if (formalTail && !source.endsWith(formalTail)) return null
+  }
+  try {
+    const rebuilt = renderPlotOutlineRange(source.slice(first.index, cut.index).trim(), range, expected)
+    return validPlotOutlineAuthorPrefix(rebuilt, progress, range) ? rebuilt : null
+  } catch {
+    return null
+  }
+}
+
 export function plotOutlineSourceInvalid(progress: Pick<PlotOutlineProgress, 'cursor'>): boolean {
   return progress.cursor.kind === 'stopped' && progress.cursor.reason === 'source-invalid'
 }
