@@ -793,17 +793,49 @@ export class GenerationRunRepository {
     }
     recoverInterrupted(): void {
         this.transaction(() => {
-            const roots = this.db().prepare('SELECT root_action_id FROM generation_roots').all() as {
+            // 这里原先对每个根都调用 budget()（按根取全部尝试并解析），只为找出还在派发中/待取消的尝试，
+            // 再逐个根 pause()。长跑后根与尝试都很多，而它跑在关闭作品、停止的同步路径上，
+            // 于是「一停就卡」。改成：定向查询定位需要改状态的尝试，根的状态一次批量改完。
+            // 冻结的可移植历史与作者已改过的根整根跳过，保持逐字节不变。
+            const affected = this.db().prepare(`SELECT attempt_id,attempt_json,root_action_id,
+                json_extract(attempt_json,'$.status') AS status FROM generation_attempts
+                WHERE json_extract(attempt_json,'$.status') IN ('dispatch-marked','reserved') ORDER BY rowid`).all() as {
+                attempt_id: string;
+                attempt_json: string;
                 root_action_id: string;
+                status: string;
             }[];
-            for (const { root_action_id: id } of roots) {
-                if (this.frozenRoot(id)) continue;
-                for (const attempt of this.budget(id).attempts)
-                    if (attempt.status === 'dispatch-marked') {
-                        attempt.status = 'unknown';
-                        this.db().prepare('UPDATE generation_attempts SET attempt_json=? WHERE attempt_id=?').run(encode(attempt), attempt.attemptId);
-                    }
-                this.pause(id);
+            const frozen = new Set<string>();
+            const isFrozenRoot = (rootId: string): boolean => {
+                const cached = frozen.has(rootId);
+                if (cached) return true;
+                const value = this.frozenRoot(rootId);
+                if (value) frozen.add(rootId);
+                return value;
+            };
+            for (const row of affected) {
+                if (isFrozenRoot(row.root_action_id)) continue;
+                if (this.isFrozen('generation_attempts', row.attempt_id)) continue;
+                const attempt = JSON.parse(row.attempt_json) as PhysicalAttempt;
+                attempt.status = row.status === 'dispatch-marked' ? 'unknown' : 'cancelled-before-dispatch';
+                this.db().prepare('UPDATE generation_attempts SET attempt_json=? WHERE attempt_id=?').run(encode(attempt), row.attempt_id);
+            }
+            const roots = this.db().prepare('SELECT root_action_id,action_json,active_elapsed_ms,active_since_ms FROM generation_roots').all() as {
+                root_action_id: string;
+                action_json: string;
+                active_elapsed_ms: number;
+                active_since_ms: number | null;
+            }[];
+            const now = this.now();
+            for (const row of roots) {
+                const id = row.root_action_id;
+                if (isFrozenRoot(id)) continue;
+                const root = JSON.parse(row.action_json) as GenerationBudgetReceipt['root'];
+                if (['cancelled', 'sealed'].includes(root.status)) continue;
+                root.status = 'paused';
+                const elapsed = row.active_elapsed_ms + (row.active_since_ms === null ? 0 : Math.max(0, now - row.active_since_ms));
+                this.db().prepare('UPDATE generation_roots SET action_json=?,active_elapsed_ms=?,active_since_ms=NULL WHERE root_action_id=?').run(encode(root), elapsed, id);
+                this.db().prepare('UPDATE generation_runs SET status=? WHERE root_action_id=?').run('paused', id);
             }
         });
     }
