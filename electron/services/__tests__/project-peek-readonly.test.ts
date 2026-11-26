@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { initializeLegacyBaselineSchema } from '../../migrations/baseline-schema'
 import { CURRENT_DESKTOP_SCHEMA_VERSION, getDesktopMigrationRegistry } from '../../migrations/desktop-registry'
 import { migrateSchema } from '../../migrations/runner'
@@ -157,6 +157,58 @@ describe('ProjectPeekService source-zero-write overview', () => {
     expect(f.database.pragma('user_version', { simple: true })).toBe(userVersion)
     expect(f.database.prepare('SELECT COUNT(*) AS count FROM finalization_outbox').get()).toEqual(outbox)
     expect(fs.readdirSync(f.storage).sort()).toEqual(['project.db', 'project.db-shm', 'project.db-wal', 'project.json'])
+    expect(fs.readdirSync(f.scratch)).toEqual([])
+  })
+
+  it('hashes large preview databases in bounded chunks instead of allocating whole-file buffers', () => {
+    const f = fixture()
+    f.database.prepare('INSERT INTO contents (body) VALUES (?)').run('x'.repeat(4 * 1024 * 1024))
+    expect(fs.statSync(f.databasePath).size).toBeGreaterThan(4 * 1024 * 1024)
+    const before = sourceState(f.databasePath)
+    const service = new ProjectPeekService({ scratchRoot: f.scratch })
+    const capability = service.issueCapability(f.root)!
+    const wholeReads = vi.spyOn(fs, 'readFileSync')
+    const chunkReads = vi.spyOn(fs, 'readSync')
+    try {
+      ready(service.peek(capability.capabilityId))
+      expect(wholeReads.mock.calls.filter(([file]) => typeof file === 'string'
+        && /\.db(?:-wal|-shm)?$/.test(file))).toEqual([])
+      expect(chunkReads.mock.calls.length).toBeGreaterThan(3)
+      for (const [, buffer] of chunkReads.mock.calls) {
+        expect(buffer.byteLength).toBeLessThanOrEqual(1024 * 1024)
+      }
+    } finally {
+      wholeReads.mockRestore()
+      chunkReads.mockRestore()
+    }
+    expect(sourceState(f.databasePath)).toEqual(before)
+    expect(fs.readdirSync(f.scratch)).toEqual([])
+  })
+
+  it('still rejects a snapshot changed beyond the first hash chunk', () => {
+    const f = fixture()
+    f.database.prepare('INSERT INTO contents (body) VALUES (?)').run('x'.repeat(4 * 1024 * 1024))
+    const before = sourceState(f.databasePath)
+    const service = new ProjectPeekService({ scratchRoot: f.scratch })
+    const capability = service.issueCapability(f.root)!
+    const copy = fs.copyFileSync.bind(fs)
+    const copies = vi.spyOn(fs, 'copyFileSync').mockImplementation((source, destination, flags) => {
+      copy(source, destination, flags)
+      if (String(destination).endsWith('snapshot.db')) {
+        const descriptor = fs.openSync(destination, 'r+')
+        try {
+          const offset = fs.fstatSync(descriptor).size - 1
+          const byte = Buffer.alloc(1)
+          fs.readSync(descriptor, byte, 0, 1, offset)
+          byte[0] ^= 0xff
+          fs.writeSync(descriptor, byte, 0, 1, offset)
+        } finally { fs.closeSync(descriptor) }
+      }
+    })
+    try {
+      expect(service.peek(capability.capabilityId)).toEqual({ state: 'unavailable' })
+    } finally { copies.mockRestore() }
+    expect(sourceState(f.databasePath)).toEqual(before)
     expect(fs.readdirSync(f.scratch)).toEqual([])
   })
 

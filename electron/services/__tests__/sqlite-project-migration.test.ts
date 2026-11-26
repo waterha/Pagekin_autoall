@@ -8,7 +8,10 @@ import { initializeLegacyBaselineSchema } from '../../migrations/baseline-schema
 import { ensureBaselineBlueprintTables } from '../../migrations/baseline-blueprint-schema'
 import { sqliteSchemaFingerprint } from '../../migrations/sqlite-schema-adapter'
 import { logicalTableName } from '../../migrations/m07-chapter-recycle'
-import { backupProjectSqlite, probeProjectSqlite, verifyProjectSqlite, upgradeProjectSqlite } from '../sqlite-project-migration'
+import { backupProjectSqlite, openProjectSqlite, probeProjectSqlite, readSqliteContentIdentity, verifyProjectSqlite, upgradeProjectSqlite } from '../sqlite-project-migration'
+import { CURRENT_DESKTOP_SCHEMA_VERSION, getDesktopMigrationRegistry } from '../../migrations/desktop-registry'
+import { migrateSchema } from '../../migrations/runner'
+import { SqliteSchemaAdapter } from '../../migrations/sqlite-schema-adapter'
 import { CharacterRosterRepository } from '../../repositories/character-roster-repository'
 import { ProjectCoreRepository } from '../../repositories/project-core-repository'
 
@@ -130,6 +133,32 @@ afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true })
 })
 describe('real SQLite schema probe and WAL staging backup', () => {
+  it('opens and revalidates large current databases and WALs without whole-file allocations', () => {
+    const f = fixture()
+    migrateSchema(new SqliteSchemaAdapter(f.db), getDesktopMigrationRegistry(), CURRENT_DESKTOP_SCHEMA_VERSION)
+    f.db.prepare('INSERT INTO contents (body) VALUES (?)').run('x'.repeat(4 * 1024 * 1024))
+    f.db.pragma('wal_checkpoint(TRUNCATE)')
+    f.db.prepare('INSERT INTO contents (body) VALUES (?)').run('y'.repeat(2 * 1024 * 1024))
+    const before = bytes(f.root)
+    const expected = { database: before['source.db'], wal: before['source.db-wal'] }
+    const wholeReads = vi.spyOn(fs, 'readFileSync')
+    const chunkReads = vi.spyOn(fs, 'readSync')
+    try {
+      expect(openProjectSqlite({ databasePath: f.source })).toEqual(expected)
+      expect(readSqliteContentIdentity(f.source)).toEqual(expected)
+      expect(wholeReads.mock.calls.filter(([file]) => typeof file === 'string'
+        && /\.db(?:-wal|-shm|-journal)?$/.test(file))).toEqual([])
+      expect(chunkReads.mock.calls.length).toBeGreaterThan(5)
+      for (const [, buffer] of chunkReads.mock.calls) {
+        expect(buffer.byteLength).toBeLessThanOrEqual(1024 * 1024)
+      }
+    } finally {
+      wholeReads.mockRestore()
+      chunkReads.mockRestore()
+    }
+    expect(bytes(f.root)).toMatchObject({ 'source.db': expected.database, 'source.db-wal': expected.wal })
+  })
+
   it.each([
     ['empty', 'empty', 'empty'],
     ['markdown', 'legacy_markdown_pending', 'legacy_repair_required'],

@@ -15,6 +15,7 @@ import { M08_EXEMPTION_COLUMNS, M08_TABLES } from '../migrations/m08-continuity-
 import { initializeLegacyBaselineSchema } from '../migrations/baseline-schema'
 import { ensureBaselineBlueprintTables } from '../migrations/baseline-blueprint-schema'
 import { initializeCharacterRosterMetadata } from '../repositories/character-roster-schema'
+import { sha256FileSync } from '../utils/file-sha256'
 
 const require = createRequire(import.meta.url)
 const Database = require('better-sqlite3') as typeof import('better-sqlite3')
@@ -76,7 +77,7 @@ const sqliteSuffixes = ['', '-wal', '-shm', '-journal'] as const
 function sourceIdentity(file: string): Record<string, string> {
   sourceFile(file)
   return Object.fromEntries(sqliteSuffixes.filter(suffix => fs.existsSync(file + suffix)).map(suffix =>
-    [suffix, createHash('sha256').update(fs.readFileSync(file + suffix)).digest('hex')]))
+    [suffix, sha256FileSync(file + suffix)]))
 }
 /** SQLite readonly handles may still write original -shm reader marks. Copy the
  * physical DB/WAL/SHM set using filesystem reads, then connect only this copy.

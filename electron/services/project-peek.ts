@@ -20,6 +20,7 @@ import { CURRENT_DESKTOP_SCHEMA_VERSION, getDesktopMigrationRegistry } from '../
 import { migrateSchema, verifySchema } from '../migrations/runner'
 import { CURRENT_DRAFT_STATUS_SQL } from '../../src/shared/draft-status'
 import { SqliteSchemaAdapter } from '../migrations/sqlite-schema-adapter'
+import { sha256FileSync } from '../utils/file-sha256'
 
 const require = createRequire(import.meta.url)
 const Database = require('better-sqlite3') as typeof import('better-sqlite3')
@@ -113,7 +114,7 @@ function sourceState(databasePath: string): PhysicalFileState[] {
     return {
       suffix,
       size: info.size.toString(),
-      hash: digest(fs.readFileSync(file)),
+      hash: sha256FileSync(file),
       device: info.dev.toString(),
       inode: info.ino.toString(),
       modified: info.mtimeNs.toString(),
