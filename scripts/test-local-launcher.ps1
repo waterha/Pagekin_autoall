@@ -30,6 +30,36 @@ $actual = & $launcher -RepositoryRoot $fixture -CheckOnly
 if ($actual -cne $expected) { throw "Wrong package target: $actual; expected $expected" }
 Write-Host 'PASS: version, Unicode product name, paths with spaces, explicit repository'
 
+# Exercise the real launch call site without starting a GUI in the test.
+function Start-Process {
+    param($FilePath, $WorkingDirectory, [switch]$PassThru)
+    if ($FilePath -cne $expected -or $WorkingDirectory -cne $package) { throw 'Wrong Start-Process target' }
+    if ($env:ELECTRON_RUN_AS_NODE) { throw 'Node mode was not cleared for the child' }
+    $fake = [pscustomobject]@{ Id = 123; ExitCode = -2147483645 }
+    $fake | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($timeout) return $true }
+    return $fake
+}
+$previousNodeMode = $env:ELECTRON_RUN_AS_NODE
+try {
+    $env:ELECTRON_RUN_AS_NODE = '1'
+    $caughtExit = $false
+    try { & $launcher -RepositoryRoot $fixture | Out-Null }
+    catch {
+        if ($_.Exception.Message -notlike '*0x80000003*') { throw }
+        $caughtExit = $true
+    }
+    if (-not $caughtExit) { throw 'Immediate native exit was silently reported as a successful start.' }
+    if ($env:ELECTRON_RUN_AS_NODE -ne '1') { throw 'Parent Node-mode environment was not restored' }
+    $log = Join-Path $fixture '.runtime\launcher-last-error.log'
+    if (-not (Test-Path -LiteralPath $log)) { throw 'No persistent startup failure log was written' }
+    if ((Get-Content -LiteralPath $log -Raw) -notlike '*0x80000003*') { throw 'Startup failure log lost the exit code' }
+} finally {
+    Remove-Item Function:Start-Process
+    if ($null -ne $previousNodeMode) { $env:ELECTRON_RUN_AS_NODE = $previousNodeMode }
+    else { Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue }
+}
+Write-Host 'PASS: immediate native exit is reported, logged, and parent environment is restored'
+
 Set-Content -LiteralPath (Join-Path $fixture 'package.json') -Encoding UTF8 -Value '{"version":"9.8.8"}'
 $rejected = $false
 try { & $launcher -RepositoryRoot $fixture -CheckOnly | Out-Null }
