@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { registerIPCHandlers } from './ipc-handlers'
 import { registerMCPHandlers } from './mcp/mcp-ipc-bridge'
 import { mainT } from './i18n'
@@ -39,6 +39,7 @@ import { runGlobalDataMigration, activateGlobalData } from './services/global-da
 import { ensureVelaHome } from './utils/config-utils'
 import type { StartupBlockedCode, StartupMigrationNotice } from '../src/shared/startup-contract'
 import { APP_BRAND } from '../src/shared/brand'
+import { loadRendererWithRecovery } from './services/renderer-startup'
 
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
@@ -171,11 +172,28 @@ function createWindow() {
   // 渲染进程不能把现有主窗口导航到外部内容。
   win.webContents.on('will-navigate', preventRendererNavigation)
 
-  if (VITE_DEV_SERVER_URL) {
-    win.loadURL(VITE_DEV_SERVER_URL)
-  } else {
-    win.loadFile(path.join(RENDERER_DIST, 'index.html'))
-  }
+  const startupWindow = win
+  loadRendererWithRecovery(startupWindow, {
+    load: () => VITE_DEV_SERVER_URL
+      ? startupWindow.loadURL(VITE_DEV_SERVER_URL)
+      : startupWindow.loadFile(path.join(RENDERER_DIST, 'index.html')),
+    onRetry: (failure, retry) => {
+      console.warn('[AI Novel startup] Retrying initial renderer load', { ...failure, retry })
+    },
+    onFailure: failure => {
+      console.error('[AI Novel startup] Initial renderer failed', failure)
+      const chinese = app.getLocale().toLowerCase().startsWith('zh')
+      const detail = `${failure.reason}${failure.exitCode === undefined ? '' : ` (${failure.exitCode})`}${failure.message ? `\n${failure.message}` : ''}`
+      dialog.showErrorBox(
+        chinese ? '书童启动失败' : 'Pagekin could not start',
+        chinese
+          ? `界面进程未能启动，已重试但仍未恢复。请重新启动书童。小说数据没有因此被删除。\n\n错误信息：${detail}`
+          : `The interface could not start after retrying. Please restart Pagekin. No novel data was deleted by this failure.\n\nDetails: ${detail}`,
+      )
+      // A renderer that never loaded cannot answer the editor close handshake.
+      if (!startupWindow.isDestroyed()) startupWindow.destroy()
+    },
+  })
 }
 
 function createReleaseHomepageSmokeWindow(): BrowserWindow {
