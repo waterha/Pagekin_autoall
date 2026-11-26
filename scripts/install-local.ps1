@@ -30,6 +30,10 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'electron-builder failed' }
     }
 
+    # A Low-labeled workspace can stamp the browser EXE and ffmpeg.dll Low.
+    # The browser then cannot initialize, or Chromium refuses the delayed DLL load.
+    & (Join-Path $PSScriptRoot 'repair-local-runtime.ps1') -RepositoryRoot $RepositoryRoot
+
     & node scripts/verify-win-package.mjs $packageRoot
     if ($LASTEXITCODE -ne 0) { throw 'package verification failed' }
     Write-Host "Verified repository package: $packageRoot"
