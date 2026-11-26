@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3'
+import { GenerationRunSummaries } from './generation-run-summaries'
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import type { BeginGenerationRequest, ExecuteGenerationRequest, BeginGenerationBatchRequest, GenerationDraftCommitRequest, GenerationRecoveryContext, MaterialAdmission, MaterialDecisionReceipt, VisibleCompositionAlgorithm, GenerationOwnerChannels, GenerationRecoveryList, ShortOutlineRetry, PlanningContinuation, PlanningDraftStanding } from '../../src/shared/generation-owner-contract'
@@ -373,13 +374,14 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
         activeElapsedMs: budget.activeElapsedMs, blockedCode: budget.blockedCode }, artifacts, candidates,
       unsavedTails: service.readUnsavedTails().filter(tail => budget.attempts.some(attempt => attempt.attemptId === tail.attemptId)) }
   }
-  /** 本作品的全部运行，新的在前；只从库里取身份、状态与操作类型，不解析整份冻结上下文。 */
-  const runSummaries = () => (deps.database.prepare(`SELECT run_id,root_action_id,status,
-      json_extract(binding_json,'$.projectId','$.epoch','$.sourceManifest.operation','$.sourceManifest.batchId','$.sourceManifest.batchIntent') AS identity
-      FROM generation_runs ORDER BY created_at_ms DESC, rowid DESC`).all() as { run_id: string; root_action_id: string; status: MainGenerationRunView['status']; identity: string }[])
+  let summaryReader: GenerationRunSummaries | undefined
+  const summaries = () => summaryReader ??= new GenerationRunSummaries(deps.database)
+  const prepareRecoveryReads = () => summaries().prepare(assertCurrent)
+  /** 摘要缓存在当前连接的临时表中；状态直接读实时行，不重复扫描历史冻结正文。 */
+  const runSummaries = () => summaries().read()
     .map(row => {
       const [projectId, epoch, operation, batchId, batchIntent] = JSON.parse(row.identity) as [string, string, string | null, string | null, unknown]
-      return { handle: { projectId, epoch, rootActionId: row.root_action_id, runId: row.run_id }, status: row.status, operation: operation ?? undefined,
+      return { handle: { projectId, epoch, rootActionId: row.root_action_id, runId: row.run_id }, status: row.status as MainGenerationRunView['status'], operation: operation ?? undefined,
         batchId, batchRoot: Boolean(batchIntent) }
     }).filter(run => run.handle.projectId === deps.projectId)
   const list = (): MainGenerationRunSummary[] => {
@@ -1097,7 +1099,7 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
    * 单章写稿保存过就不再需要恢复，正文后来改没改过都一样；只有这次打开里还留着没落盘的正文时仍列出，那段文字只能从这里复制。
    * 规划恢复稿是否列出按 planningRecoverable 判定，与蓝图页横幅、架构页大纲提示同一条。
    */
-  const listRecovery = (): GenerationRecoveryList => {
+  function* recoveryReads(): Generator<void, GenerationRecoveryList, void> {
     assertCurrent()
     const list: GenerationRecoveryList = { planning: [], editors: [], reviews: [], batches: [], drafts: [], partial: false }
     const hasText = (item: { text: string }) => item.text.trim().length > 0
@@ -1129,23 +1131,45 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
     }
     const runs = runSummaries()
     for (const run of runs) {
+      assertCurrent()
       const kind = RECOVERY_KIND.get(run.operation ?? '')
       if (!kind || (kind === 'draft' && run.batchId)) continue
       try { collect[kind](run.handle) } catch (error) {
         if (!(error instanceof ReviewSourceDeletedError)) list.partial = true
       }
+      yield
     }
     const batchRoots = runs.filter(item => item.batchRoot)
     if (!batchRoots.length) return list
     const { commits, unreadable } = draftEffects.listedBatchCommits()
     if (unreadable) list.partial = true
     for (const run of batchRoots) {
+      assertCurrent()
       try {
         const batch = draftEffects.readBatchHistory(run.handle.runId, deps.projectId, commits)
         if (batch.nextChapterNumber !== null) list.batches.push(batch)
       } catch { list.partial = true }
+      yield
     }
     return list
+  }
+  const listRecovery = (): GenerationRecoveryList => {
+    const reads = recoveryReads()
+    for (;;) { const next = reads.next(); if (next.done) return next.value }
+  }
+  const listRecoveryAsync = async (): Promise<GenerationRecoveryList> => {
+    await prepareRecoveryReads()
+    const reads = recoveryReads()
+    let yieldedAt = performance.now()
+    for (;;) {
+      const next = reads.next()
+      if (next.done) return next.value
+      if (performance.now() - yieldedAt >= 8) {
+        await new Promise<void>(resolve => setImmediate(resolve))
+        assertCurrent()
+        yieldedAt = performance.now()
+      }
+    }
   }
   /**
    * 蓝图页挂载时要的那份：最新一个还没写完的章节蓝图恢复稿；只读章节蓝图运行，读不出的跳过，不挡更早的恢复稿。
@@ -1667,7 +1691,7 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
     prepareReviewRevision: (request: PrepareReviewRevisionRequest) => reviewRevisions.prepare(request),
     commitReview: (request: ReviewGenerationCommitRequest) => reviewRevisions.commitReview(request, assertSourcesCurrent),
     commitRevision: (request: RevisionGenerationCommitRequest) => reviewRevisions.commitRevision(request, assertSourcesCurrent),
-    readReviewRevisionRecovery, listRecovery, findBlueprintRecovery, dismissPlanningRecovery,
+    readReviewRevisionRecovery, listRecovery, listRecoveryAsync, prepareRecoveryReads, findBlueprintRecovery, dismissPlanningRecovery,
     readContext, readBatch, prepareDraftContext, preparedKnowledge, draftPreparationBinding, retryDraftShortOutline,
     beginBatch: (request: BeginGenerationBatchRequest) => {
       assertGenerationBatchIntent(request)

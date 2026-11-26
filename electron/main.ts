@@ -182,11 +182,11 @@ function createWindow() {
     },
     onFailure: failure => {
       console.error('[AI Novel startup] Initial renderer failed', failure)
-      const chinese = app.getLocale().toLowerCase().startsWith('zh')
+      const isChineseLocale = app.getLocale().toLowerCase().startsWith('zh')
       const detail = `${failure.reason}${failure.exitCode === undefined ? '' : ` (${failure.exitCode})`}${failure.message ? `\n${failure.message}` : ''}`
       dialog.showErrorBox(
-        chinese ? '书童启动失败' : 'Pagekin could not start',
-        chinese
+        isChineseLocale ? '书童启动失败' : 'Pagekin could not start',
+        isChineseLocale
           ? `界面进程未能启动，已重试但仍未恢复。请重新启动书童。小说数据没有因此被删除。\n\n错误信息：${detail}`
           : `The interface could not start after retrying. Please restart Pagekin. No novel data was deleted by this failure.\n\nDetails: ${detail}`,
       )

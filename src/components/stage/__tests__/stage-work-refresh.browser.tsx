@@ -11,6 +11,7 @@ import { setActiveProjectSessionContext } from '../../../shared/project-session-
 import { useDraftStore } from '../../../stores/draft-store'
 import { useStageStore } from '../../../stores/navigation/stage-store'
 import { useProjectStore } from '../../../stores/project-store'
+import { useWorkflowStore, type WorkflowRun } from '../../../stores/workflow-store'
 import StageSpine from '../StageSpine'
 import { useStageView, useStageWorkRefresh } from '../use-stage-work'
 
@@ -32,7 +33,7 @@ function snapshot<T>(store: StoreApi<T>): () => void {
   const state = store.getState()
   return () => store.setState(state, true)
 }
-const restores = [snapshot(useDraftStore), snapshot(useStageStore), snapshot(useProjectStore)]
+const restores = [snapshot(useDraftStore), snapshot(useStageStore), snapshot(useProjectStore), snapshot(useWorkflowStore)]
 
 let root: Root | undefined
 let host: HTMLDivElement | undefined
@@ -58,7 +59,7 @@ const announce = (projectSession: ProjectSessionContext) => act(async () => glob
 
 beforeEach(async () => {
   standing = 'open'
-  const invoke = async (channel: string) => {
+  const invoke = vi.fn(async (channel: string) => {
     switch (channel) {
       case 'db:project-core-get': return { premise: LONG, worldbuilding: LONG, synopsis: COMPLETE_OUTLINE }
       case 'db:character-roster-read': return { status: 'ready' }
@@ -73,7 +74,7 @@ beforeEach(async () => {
       }
       default: throw new Error(`unexpected IPC ${channel}`)
     }
-  }
+  })
   Object.defineProperty(window, 'aiNovelAPI', { configurable: true, value: { invoke, on: () => () => {}, once: () => {}, send: () => {} } })
   await act(async () => {
     setActiveProjectSessionContext(CURRENT)
@@ -97,6 +98,24 @@ afterEach(async () => {
 })
 
 describe('放弃大纲恢复稿后流程脊的架构状态（#608）', () => {
+  it('任务内逐步推进不反复读取全书，资源真正更新和运行结束才刷新', async () => {
+    const invoke = vi.mocked(window.aiNovelAPI!.invoke)
+    const reads = () => invoke.mock.calls.filter(([channel]) => channel === 'db:draft-list-all').length
+    const run = { id: 'long-book-writing', status: 'running', steps: [{ status: 'running' }] } as WorkflowRun
+    await act(async () => useWorkflowStore.setState({ activeRuns: [run] }))
+    await elapse(150)
+    const before = reads()
+    for (let i = 0; i < 5; i++) {
+      await act(async () => useWorkflowStore.setState({ activeRuns: [{ ...run, steps: [{ status: i % 2 ? 'completed' : 'running' }] as WorkflowRun['steps'] }] }))
+      await elapse(100)
+    }
+    expect(reads()).toBe(before)
+    await act(async () => globalEventBus.emit('REFRESH_RESOURCE', { projectPath: PATH, projectSession: CURRENT, resources: ['blueprints'] }))
+    await vi.waitFor(() => expect(reads()).toBe(before + 1))
+    await act(async () => useWorkflowStore.setState({ activeRuns: [] }))
+    await vi.waitFor(() => expect(reads()).toBe(before + 2))
+  })
+
   it('正式大纲已写满、只因恢复稿才未完成：放弃后流程脊立即标为完成', async () => {
     standing = 'dismissed'
     await announce(CURRENT)

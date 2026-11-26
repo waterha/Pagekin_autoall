@@ -18,13 +18,18 @@ type Text = (zh: string, en: string) => string
 export function RunRecoveryList({ recovery, liveRuns }: { recovery: RunRecovery; liveRuns: readonly WorkflowRun[] }) {
   const text = useLocaleStore(s => s.text)
   const leaseId = useProjectStore(s => s.currentProject?.sessionLease)
+  const [page, setPage] = useState({ leaseId, count: 20 })
+  const shown = page.leaseId === leaseId ? page.count : 20
   const entries = recovery.entries.filter(entry => !isInFlight(entry, leaseId, liveRuns))
   const errors = [recovery.generationError, recovery.candidateError].filter(Boolean)
   if (!entries.length && !errors.length) return null
   return (
     <section className="run-recovery" aria-label={text('可恢复的内容', 'Recoverable work')}>
       {errors.map(error => <p key={error} className="run-note" data-tone="danger" role="alert">{error}</p>)}
-      {entries.map(entry => <RecoveryCard key={`${entry.kind}:${entry.key}`} entry={entry} recovery={recovery} text={text} />)}
+      {entries.slice(0, shown).map(entry => <RecoveryCard key={`${entry.kind}:${entry.key}`} entry={entry} recovery={recovery} text={text} />)}
+      {entries.length > shown && <Button variant="text" size="sm" onClick={() => setPage({ leaseId, count: shown + 20 })}>
+        {text(`再显示 ${Math.min(20, entries.length - shown)} 条（还有 ${entries.length - shown} 条）`, `Show ${Math.min(20, entries.length - shown)} more (${entries.length - shown} remaining)`)}
+      </Button>}
     </section>
   )
 }

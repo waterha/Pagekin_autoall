@@ -59,9 +59,9 @@ export async function refreshStageWork(text: (zh: string, en: string) => string)
   }
 }
 
-/** 任一运行的状态或步骤状态变化都要重新读。 */
+/** 等待确认或任务结束时重读；同一任务的步骤推进由资源事件通知，不重扫全书。 */
 function workflowRefreshKey(runs: readonly WorkflowRun[]): string {
-  return runs.map(run => `${run.id}:${run.status}|${run.steps.map(step => step.status).join(',')}`).join(';')
+  return runs.map(run => `${run.id}:${run.status}`).join(';')
 }
 
 /**

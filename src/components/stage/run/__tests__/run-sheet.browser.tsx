@@ -117,6 +117,18 @@ afterEach(async () => {
 })
 
 describe('运行侧页', () => {
+  it('长篇历史只先渲染20份恢复卡片，其余可继续展开且不丢失', async () => {
+    candidates = Array.from({ length: 65 }, (_, index) => ({ ...candidate(), candidateId: `long-${index}`, chapterNumber: index + 1 }))
+    await render()
+    await vi.waitFor(() => expect(host!.querySelectorAll('.run-recovery .run-card')).toHaveLength(20))
+    await click('再显示 20 条（还有 45 条）')
+    expect(host!.querySelectorAll('.run-recovery .run-card')).toHaveLength(40)
+    await click('再显示 20 条（还有 25 条）')
+    expect(host!.querySelectorAll('.run-recovery .run-card')).toHaveLength(60)
+    await click('再显示 5 条（还有 5 条）')
+    expect(host!.querySelectorAll('.run-recovery .run-card')).toHaveLength(65)
+  })
+
   it.each([
     { mode: '正文', setActive: (active: boolean) => useManuscriptAutomation.setState({ session, active }) },
     { mode: '蓝图', setActive: (active: boolean) => useBlueprintAutomation.setState({ session, active }) },

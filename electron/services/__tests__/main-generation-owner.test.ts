@@ -175,6 +175,19 @@ async function frozenAggregateRun(f: ReturnType<typeof fixture>, selection: Begi
 }
 
 describe('chapter outline main authority', () => {
+  it('异步恢复列表和同步判定一致，切换项目时在下一段读取前终止', async () => {
+    const f = fixture()
+    f.owner.begin(outlineSelection(f, 3))
+    const expected = f.owner.listRecovery()
+    const actual = await f.owner.listRecoveryAsync()
+    expect(actual).toEqual(expected)
+    const another = fixture()
+    another.owner.begin(outlineSelection(another, 3))
+    const pending = another.owner.listRecoveryAsync()
+    another.invalidate()
+    await expect(pending).rejects.toThrow('GENERATION_EPOCH_STALE')
+  })
+
   it('大纲自动化保存完整前缀的真实收据并继续缺少章节，不写入半截候选', async () => {
     const { recoverOutlineAutomation } = await import('../../../src/services/outline-automation-recovery')
     const { ipc } = await import('../../../src/services/ipc-client')
