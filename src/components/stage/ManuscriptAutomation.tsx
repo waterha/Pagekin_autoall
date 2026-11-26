@@ -21,16 +21,17 @@ export default function ManuscriptAutomation() {
   return <div className="manuscript-automation">
     <button type="button" className="manuscript-automation-button" aria-pressed={active}
       disabled={!project || state.stopping || (state.active && !matches)}
-      title={text('自动保存正文修改并处理定稿冲突，依次写作、审稿、采纳全部修改、定稿，后处理失败时自动重试最多 3 轮，完成后继续下一章，直到已有蓝图结束。', 'Save manuscript edits and resolve finalization conflicts automatically, then write, review, accept all revisions, finalize, retry failed post-processing up to 3 times, and continue through the available blueprints.')}
+      title={text('自动保存正文修改并处理定稿冲突，依次写作、审稿、采纳全部修改、定稿。网络或模型服务临时故障每隔 30 秒自动重试；其他可恢复的后处理失败最多重试 3 轮。完成后继续下一章，直到已有蓝图结束。', 'Save manuscript edits and resolve finalization conflicts automatically, then write, review, accept all revisions and finalize. Retry temporary network or model service failures every 30 seconds; retry other recoverable post-processing failures up to 3 times. Continue through the available blueprints.')}
       onClick={() => { if (active) stopManuscriptAutomation(); else void startManuscriptAutomation() }}>
       {active ? <Square size={13} aria-hidden="true" /> : <Play size={13} aria-hidden="true" />}
       {state.stopping && matches ? text('正在停止…', 'Stopping…') : active ? text('停止正文自动化', 'Stop automation') : text('正文自动化', 'Automate manuscript')}
     </button>
     <span className="manuscript-automation-status" role="status" data-error={matches && state.error || undefined}>
-      {active ? state.phase === 'retrying' ? text(`第 ${state.chapter ?? '—'} 章 · 自动重试失败步骤（${state.retryAttempt}/3）`, `Chapter ${state.chapter ?? '—'} · Retrying failed steps (${state.retryAttempt}/3)`)
+      {active ? state.networkRetryWaiting ? <>{text(`第 ${state.chapter ?? '—'} 章 · ${labels[state.phase]}`, `Chapter ${state.chapter ?? '—'} · ${labels[state.phase]}`)}{'\n'}{state.message}</>
+        : state.phase === 'retrying' ? text(`第 ${state.chapter ?? '—'} 章 · 自动重试失败步骤（${state.retryAttempt}/3）`, `Chapter ${state.chapter ?? '—'} · Retrying failed steps (${state.retryAttempt}/3)`)
         : text(`第 ${state.chapter ?? '—'} 章 · ${labels[state.phase]}`, `Chapter ${state.chapter ?? '—'} · ${labels[state.phase]}`)
         : matches && state.message ? state.message : text('自动采纳全部审稿意见，逐章定稿', 'Accept all review issues and finalize each chapter')}
-      {active && state.phase === 'retrying' && state.message && <>{'\n'}{state.message}</>}
+      {active && !state.networkRetryWaiting && state.phase === 'retrying' && state.message && <>{'\n'}{state.message}</>}
     </span>
   </div>
 }

@@ -47,7 +47,7 @@ type PostStep = { stepKey: string; label: string; ok: boolean; errorMsg?: string
 const postSteps = new Map<number, PostStep[]>()
 const finalizationIds = new Map<number, string>()
 
-function leaveFailedPostProcessing(chapter: number, error = 'FINALIZATION_GENERATION_INCOMPLETE') {
+function leaveFailedPostProcessing(chapter: number, error = 'FINALIZATION_GENERATION_RESULT_UNUSABLE') {
   drafts.get(chapter * 10)!.status = 'finalized'
   finalizationIds.set(chapter, `final-${chapter}`)
   postSteps.set(chapter, [
@@ -182,6 +182,64 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); setActiveProjectSessionContext(null) })
 
 describe('正文自动化', () => {
+  it('网络失败保持自动化开启，等待30秒后再试，恢复后完成后续章节', async () => {
+    vi.useFakeTimers()
+    commands.write.mockRejectedValueOnce(new Error('NETWORK_ERROR'))
+    const running = startManuscriptAutomation()
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(useManuscriptAutomation.getState().active).toBe(true)
+      expect(useManuscriptAutomation.getState().message).toContain('30')
+      await vi.advanceTimersByTimeAsync(29999)
+      expect(commands.write).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      await running
+      expect(commands.write).toHaveBeenCalledTimes(3)
+      expect(useManuscriptAutomation.getState().error).toBe(false)
+    } finally { stopManuscriptAutomation(); vi.useRealTimers() }
+  })
+
+  it('审稿连续断线时仅重试审稿，已写正文不重复生成', async () => {
+    vi.useFakeTimers()
+    blueprintCount = 1
+    const succeed = commands.review.getMockImplementation()!
+    commands.review.mockRejectedValue(new Error('ECONNRESET'))
+    const running = startManuscriptAutomation()
+    try {
+      await vi.advanceTimersByTimeAsync(120000)
+      expect(commands.review).toHaveBeenCalledTimes(5)
+      expect(commands.write).toHaveBeenCalledOnce()
+      expect(useManuscriptAutomation.getState().active).toBe(true)
+      commands.review.mockImplementation(succeed)
+      await vi.advanceTimersByTimeAsync(30000)
+      await running
+      expect(commands.write).toHaveBeenCalledOnce()
+      expect(commands.finalize).toHaveBeenCalledOnce()
+      expect(useManuscriptAutomation.getState().error).toBe(false)
+    } finally { stopManuscriptAutomation(); vi.useRealTimers() }
+  })
+
+  it('后处理网络失败每30秒重试，超过3次仍继续且不重复定稿', async () => {
+    vi.useFakeTimers()
+    makeDraft(1); leaveFailedPostProcessing(1, 'NETWORK_ERROR')
+    blueprintCount = 1
+    const succeed = commands.repair.getMockImplementation()!
+    commands.repair.mockRejectedValue(new Error('NETWORK_ERROR'))
+    const running = startManuscriptAutomation()
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(commands.repair).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(120000)
+      expect(commands.repair).toHaveBeenCalledTimes(4)
+      expect(useManuscriptAutomation.getState().active).toBe(true)
+      commands.repair.mockImplementation(succeed)
+      await vi.advanceTimersByTimeAsync(30000)
+      await running
+      expect(commands.finalize).not.toHaveBeenCalled()
+      expect(drafts.get(10)!.status).toBe('finalized')
+      expect(useManuscriptAutomation.getState().error).toBe(false)
+    } finally { stopManuscriptAutomation(); vi.useRealTimers() }
+  })
   it('完整处理多章：全部采纳审稿项，合并后定稿，再写下一章', async () => {
     await startManuscriptAutomation()
     expect(order).toEqual(['write-1', 'review-1', 'revise-1', 'merge-1', 'finalize-1', 'write-2', 'review-2', 'revise-2', 'merge-2', 'finalize-2'])
@@ -228,6 +286,7 @@ describe('正文自动化', () => {
   })
 
   it('停止时展示本次失败运行的具体诊断，不吞掉网络错误码', async () => {
+    vi.useFakeTimers()
     vi.mocked(useWorkflowStore.getState().startWorkflow).mockImplementationOnce(async definition => {
       useWorkflowStore.setState({ history: [{ id: definition.runId, title: definition.title, status: 'failed',
         error: 'AI 未正常完成生成，结果未被保存。', failureCode: 'error', currentStepIndex: 0,
@@ -237,13 +296,17 @@ describe('正文自动化', () => {
       } as never] })
       return definition.runId!
     })
-    await startManuscriptAutomation()
+    const running = startManuscriptAutomation()
+    await vi.advanceTimersByTimeAsync(0)
     const state = useManuscriptAutomation.getState()
-    expect(state).toMatchObject({ active: false, error: true })
+    expect(state).toMatchObject({ active: true, error: false })
     expect(state.message).toContain('第 1 章')
     expect(state.message).toContain('等待服务响应超时')
     expect(state.message).toContain('UND_ERR_CONNECT_TIMEOUT')
     expect(commands.review).not.toHaveBeenCalled()
+    stopManuscriptAutomation()
+    await running
+    vi.useRealTimers()
   })
 
   it('停止与重复点击不会启动额外运行', async () => {
@@ -525,7 +588,7 @@ describe('正文自动化', () => {
   it('非关键角色步骤失败也会重试，不提前继续写作', async () => {
     makeDraft(1); leaveFailedPostProcessing(1)
     postSteps.get(1)![1].ok = true
-    postSteps.get(1)![2].errorMsg = 'FINALIZATION_GENERATION_INCOMPLETE'
+    postSteps.get(1)![2].errorMsg = 'FINALIZATION_GENERATION_RESULT_UNUSABLE'
     await startManuscriptAutomation()
     expect(commands.repair.mock.calls[0][0].stepKeys).toEqual(['character_cards'])
     expect(order.slice(0, 2)).toEqual(['repair-1', 'write-2'])

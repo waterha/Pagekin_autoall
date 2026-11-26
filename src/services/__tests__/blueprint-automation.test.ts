@@ -63,6 +63,54 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); setActiveProjectSessionContext(null) })
 
 describe('蓝图自动化', () => {
+  it('断线超过3次仍每隔30秒重试，重新读取已保存的蓝图再继续', async () => {
+    vi.useFakeTimers()
+    const start = vi.mocked(useWorkflowStore.getState().startWorkflow)
+    const original = start.getMockImplementation()!
+    let failures = 0
+    start.mockImplementation(async definition => {
+      if (failures++ < 4) {
+        // Simulate a completed batch before the failed request is reported.
+        for (let chapter = 1; chapter <= 5; chapter++) planned.add(chapter)
+        useWorkflowStore.setState({ history: [{ id: definition.runId, status: 'failed', currentStepIndex: 0,
+          error: 'NETWORK_ERROR', errorCode: 'NETWORK_ERROR', steps: [],
+        } as never] })
+        return definition.runId!
+      }
+      return original(definition)
+    })
+    const running = startBlueprintAutomation()
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(useBlueprintAutomation.getState()).toMatchObject({ active: true, networkRetryWaiting: true })
+      await vi.advanceTimersByTimeAsync(29999)
+      expect(start).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(start).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(90000)
+      await running
+      expect(mocks.generate.mock.calls.map(call => [call[0].startChapter, call[0].count])).toEqual([[6, 5], [11, 2]])
+      expect(useBlueprintAutomation.getState()).toMatchObject({ active: false, error: false })
+    } finally { stopBlueprintAutomation(); vi.useRealTimers() }
+  })
+
+  it('等待重试时停止会清理定时器，不会再次发出请求', async () => {
+    vi.useFakeTimers()
+    vi.mocked(useWorkflowStore.getState().startWorkflow).mockImplementation(async definition => {
+      useWorkflowStore.setState({ history: [{ id: definition.runId, status: 'failed', error: 'NETWORK_ERROR', steps: [] } as never] })
+      return definition.runId!
+    })
+    const running = startBlueprintAutomation()
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      stopBlueprintAutomation()
+      await running
+      await vi.advanceTimersByTimeAsync(60000)
+      expect(useWorkflowStore.getState().startWorkflow).toHaveBeenCalledOnce()
+      expect(useBlueprintAutomation.getState()).toMatchObject({ active: false, error: false })
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { vi.useRealTimers() }
+  })
   it('沿用真实蓝图工作流，按5章连续规划，最后一批不超过总章数', async () => {
     await startBlueprintAutomation()
     expect(mocks.generate.mock.calls.map(call => call[0])).toEqual([
@@ -118,7 +166,7 @@ describe('蓝图自动化', () => {
       useWorkflowStore.setState({ history: [{ id: definition.runId, title: definition.title, status: 'failed', currentStepIndex: 0,
         error: 'AI 未正常完成生成，结果未被保存。', steps: [{ name: '生成蓝图', status: 'failed', generationActivity: {
           operation: 'generate-blueprints', diagnostics: { startedAt: 0, elapsedMs: 1000, firstResponseMs: null,
-            lastResponseMs: null, lastOutputMs: null, httpStatus: 429, phase: 'response', endReason: 'failed',
+            lastResponseMs: null, lastOutputMs: null, httpStatus: 401, phase: 'response', endReason: 'failed',
             errorCode: 'HTTP_ERROR', visibleEvents: 0, reasoningEvents: 0 },
         } }],
       } as never] })
@@ -127,8 +175,8 @@ describe('蓝图自动化', () => {
     await startBlueprintAutomation()
     expect(useBlueprintAutomation.getState()).toMatchObject({ active: false, error: true })
     expect(useBlueprintAutomation.getState().message).toContain('生成蓝图')
-    expect(useBlueprintAutomation.getState().message).toContain('HTTP 429')
-    expect(useBlueprintAutomation.getState().message).toContain('配额或余额')
+    expect(useBlueprintAutomation.getState().message).toContain('HTTP 401')
+    expect(useBlueprintAutomation.getState().message).toContain('身份验证失败')
   })
 
   it('没有实际保存完整批次时停止，防止无限调用', async () => {

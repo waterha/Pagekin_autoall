@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { displayedErrorMessage } from '../i18n/app-errors'
-import { workflowFailureMessage } from './workflow-failure-presentation'
+import { AutomationWorkflowFailure, createAutomationRetryWaiter, isAutomationNetworkFailure } from './automation-network-retry'
 import { localize } from '../i18n/core'
 import type { AllInvokeChannels, ProjectSessionContext } from '../shared/ipc-channels'
 import { sameProjectPathKey, sameProjectSessionContext } from '../shared/project-session-context'
@@ -35,15 +35,17 @@ interface AutomationState {
   chapter: number | null
   phase: Phase
   retryAttempt: number
+  networkRetryWaiting: boolean
   message: string
   error: boolean
 }
 
 /** A mode belongs to one open-book lease and survives navigation between pages. */
 export const useManuscriptAutomation = create<AutomationState>(() => ({
-  session: null, active: false, stopping: false, chapter: null, phase: 'preparing', retryAttempt: 0, message: '', error: false,
+  session: null, active: false, stopping: false, chapter: null, phase: 'preparing', retryAttempt: 0, networkRetryWaiting: false, message: '', error: false,
 }))
 
+const networkRetry = createAutomationRetryWaiter()
 let activeRunId: string | undefined
 class AutomationStopped extends Error {}
 class ManuscriptEdited extends Error {}
@@ -51,6 +53,7 @@ class ManuscriptEdited extends Error {}
 export function stopManuscriptAutomation(): void {
   if (!useManuscriptAutomation.getState().active) return
   useManuscriptAutomation.setState({ stopping: true })
+  networkRetry.cancel()
   if (activeRunId) useWorkflowStore.getState().cancelWorkflow(activeRunId)
 }
 
@@ -65,7 +68,7 @@ export async function startManuscriptAutomation(): Promise<void> {
   const locale = useLocaleStore.getState().locale
   const text = (zh: string, en: string) => localize(locale, zh, en)
   const path = session.projectPath
-  useManuscriptAutomation.setState({ session, active: true, stopping: false, chapter: null, phase: 'preparing', retryAttempt: 0, message: '', error: false })
+  useManuscriptAutomation.setState({ session, active: true, stopping: false, chapter: null, phase: 'preparing', retryAttempt: 0, networkRetryWaiting: false, message: '', error: false })
 
   const check = () => {
     if (useManuscriptAutomation.getState().stopping || !isProjectSessionCurrent(session)) throw new AutomationStopped()
@@ -87,27 +90,45 @@ export async function startManuscriptAutomation(): Promise<void> {
     }
     return tabs
   }
-  const run = async (definition: WorkflowDefinition): Promise<Record<string, unknown>> => {
-    check()
-    const runId = randomUUID()
-    let data: Record<string, unknown> = {}
-    // Capture the command's exact committed identities; never infer an output from the latest row.
-    const workflow = { ...definition, runId, uiLocale: locale, onComplete: { mode: 'silent' as const },
-      steps: definition.steps.map(step => ({ ...step, executor: async (...args: Parameters<typeof step.executor>) => {
-        const result = await step.executor(...args)
-        data = { ...args[1].data }
-        return result
-      } })),
-    }
-    activeRunId = runId
+  const waitForNetwork = async (error: unknown, attempt: number) => {
+    useManuscriptAutomation.setState({ networkRetryWaiting: true })
     try {
-      await useWorkflowStore.getState().startWorkflow(workflow, false)
+      await networkRetry.wait({ check, stopped: () => new AutomationStopped(), locale, error, attempt,
+        update: message => useManuscriptAutomation.setState({ message }) })
+    } finally { useManuscriptAutomation.setState({ networkRetryWaiting: false, message: '' }) }
+  }
+  const run = async (definition: WorkflowDefinition): Promise<Record<string, unknown>> => {
+    let retry = 0
+    for (;;) {
       check()
-      const completed = useWorkflowStore.getState().history.find(item => item.id === runId)
-      if (completed?.status === 'cancelled') throw new AutomationStopped()
-      if (completed?.status !== 'completed') throw new Error(completed ? workflowFailureMessage(completed, locale) : text('正文自动化步骤未完成，已停止。', 'The automation step did not complete. Automation stopped.'))
-      return data
-    } finally { activeRunId = undefined }
+      const runId = randomUUID()
+      let data: Record<string, unknown> = {}
+      // Retry only the failed workflow; committed earlier phases are never replayed.
+      const workflow = { ...definition, runId, uiLocale: locale, onComplete: { mode: 'silent' as const },
+        steps: definition.steps.map(step => ({ ...step, executor: async (...args: Parameters<typeof step.executor>) => {
+          args[1].data.automationNetworkRetry = true
+          const result = await step.executor(...args)
+          data = { ...args[1].data }
+          return result
+        } })),
+      }
+      activeRunId = runId
+      try {
+        await useWorkflowStore.getState().startWorkflow(workflow, false)
+        check()
+        const completed = useWorkflowStore.getState().history.find(item => item.id === runId)
+        if (completed?.status === 'cancelled') throw new AutomationStopped()
+        if (completed?.status !== 'completed') throw completed ? new AutomationWorkflowFailure(completed, locale)
+          : new Error(text('正文自动化步骤未完成，已停止。', 'The automation step did not complete. Automation stopped.'))
+        return data
+      } catch (error) {
+        check()
+        // Finalization must first reconcile its durable commit and failed post-processing steps.
+        if (['finalizing', 'retrying'].includes(useManuscriptAutomation.getState().phase) || !isAutomationNetworkFailure(error)) throw error
+        activeRunId = undefined
+        await waitForNetwork(error, ++retry)
+      } finally { activeRunId = undefined }
+    }
   }
   const readDraft = async (id: number): Promise<Draft> => {
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -189,7 +210,7 @@ export async function startManuscriptAutomation(): Promise<void> {
       status: draft.status as 'draft' | 'revised' | 'reviewed', contentRevision: 0 },
   }, session)
 
-  const repairPostProcessing = async (draftId: number, chapter: number, expectedContent?: string): Promise<boolean> => {
+  const repairPostProcessing = async (draftId: number, chapter: number, expectedContent?: string, initialFailure?: unknown): Promise<boolean> => {
     // Resolve through current finalized authority, then pin the exact finalization for every retry.
     const postRun = await invoke(session, 'db:post-process-get-latest-run', 'chapter_finalize', String(chapter), path)
     if (!postRun) return false
@@ -201,7 +222,8 @@ export async function startManuscriptAutomation(): Promise<void> {
     if (!unfinished().failed.length) return false
     const failureDetails = () => unfinished().failed.map(step => `${step.label}：${displayedErrorMessage(locale,
       describeFinalizationStepError(step.errorMsg || text('未完成，未记录具体原因。', 'Incomplete; no specific cause was recorded.'), text))}`).join('\n')
-    let lastFailure = ''
+    let lastFailure: unknown = initialFailure
+    let networkAttempts = 0
     const source = await invoke(session, 'db:continuity-read-source', draftId, path)
     if (source.status !== 'valid' || source.snapshot.source.chapterNumber !== chapter
       || (expectedContent !== undefined && source.snapshot.content !== expectedContent)
@@ -218,34 +240,40 @@ export async function startManuscriptAutomation(): Promise<void> {
         throw new Error(text('定稿后处理来源已变化，正文自动化已停止。', 'The finalized post-processing source changed. Automation stopped.'))
       }
     }
-    for (let attempt = 1; attempt <= MAX_POST_PROCESS_RETRIES; attempt++) {
+    for (let attempt = 1; attempt <= MAX_POST_PROCESS_RETRIES;) {
       check()
       const { plan, failed } = unfinished()
       if (!failed.length) return true
       if (!plan.card.length) throw new Error(text(
         `定稿后处理有无法自动重试的步骤：${failed.map(step => step.label).join('、')}。请按后处理页面的说明处理。\n${failureDetails()}`,
         `Some post-finalization steps cannot be retried automatically: ${failed.map(step => step.label).join(', ')}. Follow the notes on the post-processing page.\n${failureDetails()}`))
+      const networkFailed = isAutomationNetworkFailure(lastFailure)
+        || !(lastFailure instanceof AutomationWorkflowFailure && lastFailure.blocked) && failed.some(step => isAutomationNetworkFailure(step.errorMsg))
+      if (networkFailed) await waitForNetwork(lastFailure || failureDetails(), ++networkAttempts)
       await assertSource()
       phase('retrying')
-      useManuscriptAutomation.setState({ retryAttempt: attempt, message: [failureDetails(), lastFailure].filter(Boolean).join('\n') })
+      useManuscriptAutomation.setState({ retryAttempt: attempt, message: [failureDetails(), lastFailure ? displayedErrorMessage(locale, lastFailure) : ''].filter(Boolean).join('\n') })
+      lastFailure = undefined
       try {
         // This is the same action as the chapter card's Retry failed steps button.
         await run(createRepairFinalizeWorkflow(chapter, path, session, undefined, source.snapshot.source))
       } catch (error) {
         check()
         if (error instanceof AutomationStopped) throw error
-        lastFailure = displayedErrorMessage(locale, error)
+        lastFailure = error
         // The durable step results decide whether another retry is useful.
       }
       await assertSource()
       const latest = await invoke(session, 'db:post-process-get-latest-run', 'chapter_finalize', String(chapter), path)
       if (latest?.id !== postRun.id) throw new Error(text('定稿后处理记录已变化，正文自动化已停止。', 'The post-processing record changed. Automation stopped.'))
       steps = await invoke(session, 'db:post-process-get-steps', postRun.id, path)
+      if (!isAutomationNetworkFailure(lastFailure)
+        && (lastFailure instanceof AutomationWorkflowFailure && lastFailure.blocked || !unfinished().failed.some(step => isAutomationNetworkFailure(step.errorMsg)))) attempt++
     }
     const { failed } = unfinished()
     if (failed.length) throw new Error(text(
-      `定稿后处理自动重试 ${MAX_POST_PROCESS_RETRIES} 轮仍未完成：${failed.map(step => step.label).join('、')}。已定稿正文和成功步骤已保留，请检查后重新开启正文自动化。\n${failureDetails()}${lastFailure ? `\n${lastFailure}` : ''}`,
-      `Post-processing is still incomplete after ${MAX_POST_PROCESS_RETRIES} automatic retries: ${failed.map(step => step.label).join(', ')}. Finalized text and successful steps were preserved. Check the failure before restarting automation.\n${failureDetails()}${lastFailure ? `\n${lastFailure}` : ''}`))
+      `定稿后处理自动重试 ${MAX_POST_PROCESS_RETRIES} 轮仍未完成：${failed.map(step => step.label).join('、')}。已定稿正文和成功步骤已保留，请检查后重新开启正文自动化。\n${failureDetails()}${lastFailure ? `\n${displayedErrorMessage(locale, lastFailure)}` : ''}`,
+      `Post-processing is still incomplete after ${MAX_POST_PROCESS_RETRIES} automatic retries: ${failed.map(step => step.label).join(', ')}. Finalized text and successful steps were preserved. Check the failure before restarting automation.\n${failureDetails()}${lastFailure ? `\n${displayedErrorMessage(locale, lastFailure)}` : ''}`))
     return true
   }
 
@@ -384,7 +412,7 @@ export async function startManuscriptAutomation(): Promise<void> {
           if (error instanceof AutomationStopped) throw error
           const committed = await invoke(session, 'db:draft-get-full', draft.id, path)
           if (committed?.status !== 'finalized' || committed.content !== draft.content
-            || !await repairPostProcessing(draft.id, chapter, draft.content)) throw error
+            || !await repairPostProcessing(draft.id, chapter, draft.content, error)) throw error
         }
         if ((await recoverFinalizationConflicts(draft.id)).has(chapter)) {
           if (++editRestarts >= 3) throw new Error(text('定稿期间正文持续变化，修改已保存，请暂停编辑后重试。', 'The manuscript kept changing during finalization. Edits were saved; pause editing and try again.'))
@@ -419,7 +447,7 @@ export async function startManuscriptAutomation(): Promise<void> {
     activeRunId = undefined
     // Never allow an old lease's completion to change a newer mode.
     if (sameProjectSessionContext(useManuscriptAutomation.getState().session, session)) {
-      useManuscriptAutomation.setState({ active: false, stopping: false })
+      useManuscriptAutomation.setState({ active: false, stopping: false, networkRetryWaiting: false })
     }
   }
 }

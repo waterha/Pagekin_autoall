@@ -25,6 +25,14 @@ beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
 
 describe('正文网络失败自动重试', () => {
+  it('正文自动化由外层统一每30秒重试，不叠加1、2、4秒快速重试', async () => {
+    const complete = vi.fn<GenerationSession['complete']>().mockResolvedValue(failure())
+    const context = { data: { automationNetworkRetry: true }, cancelled: false } as unknown as WorkflowContext
+    const session = withDraftNetworkRetry({ budget: {} as never, complete }, context, { log: vi.fn() } as never)
+    expect((await session.complete(task)).receipt.failureCode).toBe('NETWORK_ERROR')
+    expect(complete).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
   it('以1、2、4秒退避，同一会话内最多重试3次，仍失败返回原收据', async () => {
     const f = setup()
     const running = f.session.complete(task)

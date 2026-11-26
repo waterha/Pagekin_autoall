@@ -13,7 +13,7 @@ export default function OutlineAutomation() {
   return <div className="manuscript-automation">
     <button type="button" className="manuscript-automation-button" aria-pressed={active}
       disabled={!project || state.stopping || (state.active && !matches)}
-      title={text('每批生成 5 章大纲；自动保存、恢复中断并继续，临时故障最多重试 3 次。', 'Generate 5 outline chapters per batch; automatically save, recover interruptions and continue, retrying temporary failures up to 3 times.')}
+      title={text('每批生成 5 章大纲；自动保存、恢复中断并继续，网络或模型服务临时故障每隔 30 秒自动重试。', 'Generate 5 outline chapters per batch; automatically save, recover interruptions and continue. Retry temporary network or model service failures every 30 seconds.')}
       onClick={() => { if (active) stopOutlineAutomation(); else void startOutlineAutomation() }}>
       {active ? <Square size={13} aria-hidden="true" /> : <Play size={13} aria-hidden="true" />}
       {state.stopping && matches ? text('正在停止…', 'Stopping…') : active ? text('停止大纲自动化', 'Stop outline automation') : text('大纲自动化', 'Automate outline')}

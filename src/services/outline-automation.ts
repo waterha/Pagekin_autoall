@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { displayedErrorMessage } from '../i18n/app-errors'
-import { workflowFailureMessage } from './workflow-failure-presentation'
+import { AutomationWorkflowFailure, createAutomationRetryWaiter, isAutomationNetworkFailure } from './automation-network-retry'
 import { localize } from '../i18n/core'
 import type { ProjectSessionContext } from '../shared/ipc-channels'
 import { sameProjectSessionContext } from '../shared/project-session-context'
@@ -44,12 +44,14 @@ export const useOutlineAutomation = create<OutlineAutomationState>(() => ({
 
 let activeRunId: string | undefined
 let retryController: AbortController | undefined
+const networkRetry = createAutomationRetryWaiter()
 class AutomationStopped extends Error {}
 
 export function stopOutlineAutomation(): void {
   if (!useOutlineAutomation.getState().active) return
   useOutlineAutomation.setState({ stopping: true })
   retryController?.abort()
+  networkRetry.cancel()
   if (activeRunId) useWorkflowStore.getState().cancelWorkflow(activeRunId)
 }
 
@@ -97,6 +99,7 @@ export async function startOutlineAutomation(): Promise<void> {
     let targetUnits: number | undefined
     let pendingHandle: MainGenerationRunHandle | undefined
     let retries = 0
+    let networkRetries = 0
     for (;;) {
       try {
         useOutlineAutomation.setState({ phase: 'saving', message: text('正在检测并自动保存架构修改…', 'Checking and saving architecture edits…') })
@@ -168,7 +171,7 @@ export async function startOutlineAutomation(): Promise<void> {
         check()
         const completed = useWorkflowStore.getState().history.find(item => item.id === runId)
         if (completed?.status === 'cancelled') throw new AutomationStopped()
-        if (completed?.status !== 'completed') throw new Error(completed ? workflowFailureMessage(completed, locale) : text('本批大纲未完成，自动化已停止。', 'This outline batch did not complete. Automation stopped.'))
+        if (completed?.status !== 'completed') throw completed ? new AutomationWorkflowFailure(completed, locale) : new Error(text('本批大纲未完成，自动化已停止。', 'This outline batch did not complete. Automation stopped.'))
         const saved = await read()
         if (saved.checkpoint?.synopsis_incomplete === true
           || (saved.progress.kind !== 'partial' && saved.progress.kind !== 'complete')
@@ -178,9 +181,17 @@ export async function startOutlineAutomation(): Promise<void> {
         }
         pendingHandle = undefined
         retries = 0
+        networkRetries = 0
       } catch (error) {
         check()
         if (error instanceof AutomationStopped || error instanceof OutlineRecoveryBlocked) throw error
+        if (isAutomationNetworkFailure(error)) {
+          useOutlineAutomation.setState({ phase: 'retrying' })
+          await networkRetry.wait({ check, stopped: () => new AutomationStopped(), locale, error, attempt: ++networkRetries,
+            update: message => useOutlineAutomation.setState({ message }) })
+          continue
+        }
+        if (error instanceof AutomationWorkflowFailure && error.blocked) throw error
         if (!pendingHandle) {
           try {
             const { checkpoint } = await read()

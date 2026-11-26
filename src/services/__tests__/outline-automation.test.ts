@@ -311,11 +311,23 @@ describe('情节大纲自动化', () => {
     expect(useOutlineAutomation.getState().error).toBe(false)
   })
 
-  it('持续网络失败最多自动重试3次后停止', async () => {
+  it('持续网络失败超过3次仍每隔30秒重试，服务恢复后继续', async () => {
+    const succeed = mocks.generate.getMockImplementation()!
     mocks.generate.mockRejectedValue(new Error('NETWORK_ERROR'))
-    await runAutomation()
-    expect(mocks.generate).toHaveBeenCalledTimes(4)
-    expect(useOutlineAutomation.getState().message).toContain('重试 3 次')
+    const running = startOutlineAutomation()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mocks.generate).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(29999)
+    expect(mocks.generate).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(mocks.generate).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(90000)
+    expect(mocks.generate).toHaveBeenCalledTimes(5)
+    expect(useOutlineAutomation.getState().active).toBe(true)
+    mocks.generate.mockImplementation(succeed)
+    await vi.runAllTimersAsync()
+    await running
+    expect(useOutlineAutomation.getState()).toMatchObject({ active: false, error: false })
   })
 
   it('旧检查点指向已续接且已保存的新运行时跳过旧链条，避免循环恢复', async () => {

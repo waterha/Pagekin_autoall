@@ -20,7 +20,7 @@ const session = { projectId: 'book', leaseId: 'lease', projectPath: 'C:/book' }
 beforeEach(async () => {
   vi.clearAllMocks()
   useProjectStore.setState({ currentProject: { id: session.projectId, sessionLease: session.leaseId, path: session.projectPath } as ProjectData })
-  useManuscriptAutomation.setState({ session: null, active: false, stopping: false, message: '', error: false, phase: 'preparing', chapter: null })
+  useManuscriptAutomation.setState({ session: null, active: false, stopping: false, networkRetryWaiting: false, message: '', error: false, phase: 'preparing', chapter: null })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -29,6 +29,15 @@ beforeEach(async () => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove() })
 
 describe('正文自动化入口', () => {
+  it('网络重试时显示阶段、倒计时和原因，并能停止', async () => {
+    await act(async () => useManuscriptAutomation.setState({ session, active: true, chapter: 34, phase: 'reviewing', networkRetryWaiting: true,
+      message: '连接或模型服务暂时失败，30 秒后自动重试（第 4 次）\nECONNRESET' }))
+    expect(host.querySelector('[role=status]')!.textContent).toContain('第 34 章 · 审稿')
+    expect(host.textContent).toContain('30 秒后自动重试')
+    expect(host.textContent).toContain('ECONNRESET')
+    await userEvent.click(host.querySelector('button')!)
+    expect(actions.stop).toHaveBeenCalledOnce()
+  })
   it('一键开启，提示会自动采纳全部审稿意见', async () => {
     const button = host.querySelector('button')!
     expect(button.textContent).toBe('正文自动化')

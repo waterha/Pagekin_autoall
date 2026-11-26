@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { displayedErrorMessage } from '../i18n/app-errors'
-import { workflowFailureMessage } from './workflow-failure-presentation'
+import { AutomationWorkflowFailure, createAutomationRetryWaiter, isAutomationNetworkFailure } from './automation-network-retry'
 import { localize } from '../i18n/core'
 import type { ProjectSessionContext } from '../shared/ipc-channels'
 import { sameProjectPathKey, sameProjectSessionContext } from '../shared/project-session-context'
@@ -29,19 +29,22 @@ interface BlueprintAutomationState {
   total: number
   message: string
   error: boolean
+  networkRetryWaiting: boolean
 }
 
 export const useBlueprintAutomation = create<BlueprintAutomationState>(() => ({
   session: null, active: false, stopping: false, startChapter: null, endChapter: null,
-  total: 0, message: '', error: false,
+  total: 0, message: '', error: false, networkRetryWaiting: false,
 }))
 
+const networkRetry = createAutomationRetryWaiter()
 let activeRunId: string | undefined
 class AutomationStopped extends Error {}
 
 export function stopBlueprintAutomation(): void {
   if (!useBlueprintAutomation.getState().active) return
   useBlueprintAutomation.setState({ stopping: true })
+  networkRetry.cancel()
   if (activeRunId) useWorkflowStore.getState().cancelWorkflow(activeRunId)
 }
 
@@ -56,7 +59,7 @@ export async function startBlueprintAutomation(): Promise<void> {
   const path = session.projectPath
   const total = project.novelConfig.totalChapters
   useBlueprintAutomation.setState({ session, active: true, stopping: false, startChapter: null,
-    endChapter: null, total, message: '', error: false })
+    endChapter: null, total, message: '', error: false, networkRetryWaiting: false })
   const check = () => {
     if (useBlueprintAutomation.getState().stopping || !isProjectSessionCurrent(session)) throw new AutomationStopped()
     if (useProjectStore.getState().currentProject?.novelConfig.totalChapters !== total) {
@@ -80,51 +83,64 @@ export async function startBlueprintAutomation(): Promise<void> {
     let generationModelId: string | undefined
     let targetUnits: number | undefined
     let processed = 0
+    let retries = 0
     for (;;) {
-      check()
-      const authority = await readWritableChapters(session, locale)
-      check()
-      const existing = await invoke(session, 'db:blueprint-get-all', path)
-      const planned = new Set(existing.map(item => item.chapterNumber))
-      // Append after finalized authority, filling only missing blueprints; never replace existing chapters.
-      let start = authority.next
-      while (start <= total && planned.has(start)) start++
-      const pendingSyncs = await invoke(session, 'db:blueprint-character-sync-list-pending', path)
-      if (pendingSyncs.length > 0) throw new Error(text('蓝图已保存，但还有未完成的角色同步。请先在蓝图页重试角色同步，再开启自动化。', 'Blueprints are saved, but character synchronization is pending. Retry it on the Blueprints page before starting automation.'))
-      if (start > total) {
-        useBlueprintAutomation.setState({ message: text(`蓝图规划已完成（共 ${total} 章，本次新增 ${processed} 章）。`, `Blueprint planning is complete (${total} chapters; ${processed} added this time).`) })
-        break
-      }
-      let end = start
-      while (end < total && end - start + 1 < 5 && !planned.has(end + 1)) end++
-      useBlueprintAutomation.setState({ startChapter: start, endChapter: end })
-      const guard = await guardDirectoryGeneration(path, session, locale)
-      check()
-      if (!guard.ok) throw new Error(guard.message)
-      if (!generationModelId) {
-        const llm = useLLMStore.getState()
-        generationModelId = preferredGenerationModelId(llm.models, routeStageModel('planning', llm).modelId) ?? undefined
-        if (!generationModelId) throw new Error(text('请先在设置中配置可用于文本生成的模型。', 'Configure a text generation model in Settings first.'))
-        const config = await ipc.invoke('config:get')
-        check()
-        targetUnits = parsePlanningTargetUnits(config.blueprintTargetUnits)
-      }
-      const runId = randomUUID()
-      const definition = createDirectoryWorkflow({ mode: 'append', startChapter: start, count: end - start + 1, targetUnits }, path, session, locale)
-      check()
-      activeRunId = runId
       try {
-        await useWorkflowStore.getState().startWorkflow({ ...definition, runId, generationModelId }, false)
-      } finally { activeRunId = undefined }
-      check()
-      const completed = useWorkflowStore.getState().history.find(item => item.id === runId)
-      if (completed?.status === 'cancelled') throw new AutomationStopped()
-      if (completed?.status !== 'completed') throw new Error(completed ? workflowFailureMessage(completed, locale) : text('本批蓝图规划未完成，自动化已停止。', 'This blueprint batch did not complete. Automation stopped.'))
-      const saved = new Set((await invoke(session, 'db:blueprint-get-all', path)).map(item => item.chapterNumber))
-      for (let chapter = start; chapter <= end; chapter++) {
-        if (!saved.has(chapter)) throw new Error(text(`第 ${chapter} 章蓝图未保存，自动化已停止，请检查本批结果。`, `Chapter ${chapter}'s blueprint was not saved. Automation stopped; check this batch.`))
+        check()
+        const authority = await readWritableChapters(session, locale)
+        check()
+        const existing = await invoke(session, 'db:blueprint-get-all', path)
+        const planned = new Set(existing.map(item => item.chapterNumber))
+        // Append after finalized authority, filling only missing blueprints; never replace existing chapters.
+        let start = authority.next
+        while (start <= total && planned.has(start)) start++
+        const pendingSyncs = await invoke(session, 'db:blueprint-character-sync-list-pending', path)
+        if (pendingSyncs.length > 0) throw new Error(text('蓝图已保存，但还有未完成的角色同步。请先在蓝图页重试角色同步，再开启自动化。', 'Blueprints are saved, but character synchronization is pending. Retry it on the Blueprints page before starting automation.'))
+        if (start > total) {
+          useBlueprintAutomation.setState({ message: text(`蓝图规划已完成（共 ${total} 章，本次新增 ${processed} 章）。`, `Blueprint planning is complete (${total} chapters; ${processed} added this time).`) })
+          break
+        }
+        let end = start
+        while (end < total && end - start + 1 < 5 && !planned.has(end + 1)) end++
+        useBlueprintAutomation.setState({ startChapter: start, endChapter: end })
+        const guard = await guardDirectoryGeneration(path, session, locale)
+        check()
+        if (!guard.ok) throw new Error(guard.message)
+        if (!generationModelId) {
+          const llm = useLLMStore.getState()
+          generationModelId = preferredGenerationModelId(llm.models, routeStageModel('planning', llm).modelId) ?? undefined
+          if (!generationModelId) throw new Error(text('请先在设置中配置可用于文本生成的模型。', 'Configure a text generation model in Settings first.'))
+          const config = await ipc.invoke('config:get')
+          check()
+          targetUnits = parsePlanningTargetUnits(config.blueprintTargetUnits)
+        }
+        const runId = randomUUID()
+        const definition = createDirectoryWorkflow({ mode: 'append', startChapter: start, count: end - start + 1, targetUnits }, path, session, locale)
+        check()
+        activeRunId = runId
+        try {
+          await useWorkflowStore.getState().startWorkflow({ ...definition, runId, generationModelId }, false)
+        } finally { activeRunId = undefined }
+        check()
+        const completed = useWorkflowStore.getState().history.find(item => item.id === runId)
+        if (completed?.status === 'cancelled') throw new AutomationStopped()
+        if (completed?.status !== 'completed') throw completed ? new AutomationWorkflowFailure(completed, locale) : new Error(text('本批蓝图规划未完成，自动化已停止。', 'This blueprint batch did not complete. Automation stopped.'))
+        const saved = new Set((await invoke(session, 'db:blueprint-get-all', path)).map(item => item.chapterNumber))
+        for (let chapter = start; chapter <= end; chapter++) {
+          if (!saved.has(chapter)) throw new Error(text(`第 ${chapter} 章蓝图未保存，自动化已停止，请检查本批结果。`, `Chapter ${chapter}'s blueprint was not saved. Automation stopped; check this batch.`))
+        }
+        processed += end - start + 1
+        retries = 0
+      } catch (error) {
+        check()
+        if (!isAutomationNetworkFailure(error)) throw error
+        useBlueprintAutomation.setState({ networkRetryWaiting: true })
+        try {
+          await networkRetry.wait({ check, stopped: () => new AutomationStopped(), locale, error, attempt: ++retries,
+            update: message => useBlueprintAutomation.setState({ message }) })
+        } finally { useBlueprintAutomation.setState({ networkRetryWaiting: false, message: '' }) }
+        // Re-read saved blueprints before planning only the still-missing chapters.
       }
-      processed += end - start + 1
     }
   } catch (error) {
     useBlueprintAutomation.setState({ error: !(error instanceof AutomationStopped), message: error instanceof AutomationStopped
@@ -133,7 +149,7 @@ export async function startBlueprintAutomation(): Promise<void> {
   } finally {
     activeRunId = undefined
     if (sameProjectSessionContext(useBlueprintAutomation.getState().session, session)) {
-      useBlueprintAutomation.setState({ active: false, stopping: false })
+      useBlueprintAutomation.setState({ active: false, stopping: false, networkRetryWaiting: false })
     }
   }
 }

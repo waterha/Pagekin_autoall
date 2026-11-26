@@ -26,6 +26,7 @@ function waitForRetry(milliseconds: number, signal: AbortSignal | undefined, con
 
 /** Retry the exact prose task within its existing session and root budget, never the whole chapter. */
 export function withDraftNetworkRetry(session: GenerationSession, context: WorkflowContext, callbacks: StepCallbacks): GenerationSession {
+  if (context.data?.automationNetworkRetry === true) return session
   let retries = 0
   return {
     budget: session.budget,

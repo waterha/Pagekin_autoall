@@ -21,7 +21,7 @@ const session = { projectId: 'book', leaseId: 'lease', projectPath: 'C:/book' }
 beforeEach(async () => {
   vi.clearAllMocks()
   useProjectStore.setState({ currentProject: { id: session.projectId, sessionLease: session.leaseId, path: session.projectPath } as ProjectData })
-  useBlueprintAutomation.setState({ session: null, active: false, stopping: false, message: '', error: false, startChapter: null, endChapter: null, total: 12 })
+  useBlueprintAutomation.setState({ session: null, active: false, stopping: false, networkRetryWaiting: false, message: '', error: false, startChapter: null, endChapter: null, total: 12 })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -30,6 +30,14 @@ beforeEach(async () => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove() })
 
 describe('蓝图自动化入口', () => {
+  it('网络重试时显示倒计时及具体失败原因', async () => {
+    await act(async () => useBlueprintAutomation.setState({ session, active: true, networkRetryWaiting: true,
+      message: '30 秒后自动重试\nHTTP 503 模型服务暂时不可用' }))
+    expect(host.querySelector('[role=status]')!.textContent).toContain('30 秒后自动重试')
+    expect(host.textContent).toContain('HTTP 503')
+    await userEvent.click(host.querySelector('button')!)
+    expect(actions.stop).toHaveBeenCalledOnce()
+  })
   it('一键开启并说明每批5章', async () => {
     expect(host.querySelector('button')!.textContent).toBe('蓝图自动化')
     expect(host.textContent).toContain('每批 5 章')

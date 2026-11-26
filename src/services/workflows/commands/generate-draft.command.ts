@@ -1097,7 +1097,7 @@ export class GenerateDraftCommand extends BaseWorkflowCommand {
               if (recovery.draftSave.kind === 'changed') throw new Error('GENERATION_DRAFT_RECEIPT_INVALID')
             }
           }
-          if (recovery?.draftShortOutline?.retry?.kind === 'available') {
+          if (recovery?.draftShortOutline?.retry?.kind === 'available' && context.data.automationNetworkRetry !== true) {
             this.assertNotCancelled(context)
             callbacks.log(outlined?.receipt.failureCode === 'NETWORK_ERROR'
               ? uiText('短细纲请求网络中断，自动重试一次...', 'The short outline request lost its connection. Retrying once...')
