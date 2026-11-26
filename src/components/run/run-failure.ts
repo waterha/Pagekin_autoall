@@ -7,7 +7,7 @@ import { navigate } from '../../stores/navigation/navigation-intents'
 import { useProjectStore } from '../../stores/project-store'
 import type { WorkflowRun } from '../../stores/workflow-store'
 import { toast } from '../ui/Toast'
-import { presentWorkflowFailure, type WorkflowFailurePresentation } from '../panels/ai-output-failure-presentation'
+import { workflowRunFailurePresentation, type WorkflowFailurePresentation } from '../../services/workflow-failure-presentation'
 
 /** 运行侧页为一次失败的运行显示的内容：标题、原因、错误码，以及能接着做什么。 */
 export interface RunFailure {
@@ -22,19 +22,11 @@ export interface RunFailure {
 
 export function runFailure(run: WorkflowRun): RunFailure {
   const failedStep = run.steps.find(step => step.status === 'failed')
-  const currentStep = run.steps[run.currentStepIndex] ?? run.steps[0]
   const failedWith = (code: string) => run.errorCode === code || failedStep?.errorCode === code
   return {
     title: run.title,
     errorCode: run.errorCode ?? failedStep?.errorCode,
-    presentation: presentWorkflowFailure(
-      run.failureCode ?? currentStep?.failureCode,
-      run.error || currentStep?.error,
-      run.uiLocale,
-      run.type === 'chapter_creation' && run.chapterWordsTarget !== undefined && !(currentStep?.result || '').trim(),
-      run.promptBudgetReport ?? currentStep?.promptBudgetReport,
-      failedStep?.generationActivity ?? currentStep?.generationActivity,
-    ),
+    presentation: workflowRunFailurePresentation(run),
     canResumeOutline: failedWith(PLOT_OUTLINE_RESUME_ERROR_CODE),
     canRestartOutline: failedWith(PLOT_OUTLINE_SOURCE_CHANGED_ERROR_CODE),
   }

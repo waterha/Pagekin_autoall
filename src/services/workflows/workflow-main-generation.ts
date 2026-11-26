@@ -4,7 +4,7 @@ import type { BeginGenerationRequest } from '../../shared/generation-owner-contr
 import type { GenerationOperation } from '../../shared/model-stage-routing'
 import { createMainGenerationTransport } from '../generation/main-generation-transport'
 import { createMainOwnedGenerationRuntime, type GenerationRuntime, type MainGenerationRunHandle, type MainGenerationRunView, type MainGenerationSnapshot } from '../generation/generation-runtime'
-import { GenerationAttemptError, TerminalProviderFailureError, throwIfTerminalProviderFailure, type GenerationSession } from '../generation/generation-harness'
+import { GenerationAttemptError, TerminalProviderFailureError, throwIfTerminalProviderFailure, type GenerationAttemptReceipt, type GenerationSession } from '../generation/generation-harness'
 import { requireWorkflowProjectSession, workflowUiLocale } from './workflow-project-session'
 import { ipc } from '../ipc-client'
 import { projectSessionContextFromProject, sameProjectSessionContext } from '../../shared/project-session-context'
@@ -182,6 +182,9 @@ export async function createWorkflowMainGenerationRuntime(request: WorkflowMainG
       options?.signal?.addEventListener('abort', abort, { once: true })
       busy = true
       callbacks.setGenerationActivity?.({ operation })
+      const reportReceipt = (receipt: GenerationAttemptReceipt) => callbacks.setGenerationActivity?.({
+        operation, diagnostics: receipt.diagnostics, finishReason: receipt.finishReason, failureCode: receipt.failureCode,
+      })
       try {
         if (importStage) {
           const receipt = await ipc.invokeWithProjectSession(projectSession, 'import-generation:execute', { handle: view.handle, ordinal: importOrdinal, task,
@@ -192,17 +195,17 @@ export async function createWorkflowMainGenerationRuntime(request: WorkflowMainG
           context.mainGenerationRootHandle = Object.freeze({ ...view.handle })
           const artifactId = receipt.outcome.receipt.visibleArtifact?.artifactId
           for (const snapshot of (view.candidates ?? view.artifacts).filter(snapshot => snapshot.artifactId === artifactId)) onSnapshot(snapshot)
-          if (receipt.outcome.receipt.diagnostics) callbacks.setGenerationActivity?.({ operation, diagnostics: receipt.outcome.receipt.diagnostics })
+          reportReceipt(receipt.outcome.receipt)
           throwIfTerminalProviderFailure(receipt.outcome.receipt)
           return receipt.outcome
         }
         // Keep this nonce for the entire request; transport failures never mint a retry.
         const outcome = await inner!.execute(({ session: owned }) => owned.complete(task, { invocationNonce }))
-        if (outcome.receipt.diagnostics) callbacks.setGenerationActivity?.({ operation, diagnostics: outcome.receipt.diagnostics })
+        reportReceipt(outcome.receipt)
         return outcome
       } catch (error) {
-        if ((error instanceof GenerationAttemptError || error instanceof TerminalProviderFailureError) && error.receipt.diagnostics) {
-          callbacks.setGenerationActivity?.({ operation, diagnostics: error.receipt.diagnostics })
+        if (error instanceof GenerationAttemptError || error instanceof TerminalProviderFailureError) {
+          reportReceipt(error.receipt)
         }
         throw error
       } finally { busy = false; options?.signal?.removeEventListener('abort', abort) }

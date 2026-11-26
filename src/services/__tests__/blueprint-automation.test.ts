@@ -113,6 +113,24 @@ describe('蓝图自动化', () => {
     expect(planned.size).toBe(12)
   })
 
+  it('失败提示保留服务 HTTP 状态和失败环节', async () => {
+    vi.mocked(useWorkflowStore.getState().startWorkflow).mockImplementationOnce(async definition => {
+      useWorkflowStore.setState({ history: [{ id: definition.runId, title: definition.title, status: 'failed', currentStepIndex: 0,
+        error: 'AI 未正常完成生成，结果未被保存。', steps: [{ name: '生成蓝图', status: 'failed', generationActivity: {
+          operation: 'generate-blueprints', diagnostics: { startedAt: 0, elapsedMs: 1000, firstResponseMs: null,
+            lastResponseMs: null, lastOutputMs: null, httpStatus: 429, phase: 'response', endReason: 'failed',
+            errorCode: 'HTTP_ERROR', visibleEvents: 0, reasoningEvents: 0 },
+        } }],
+      } as never] })
+      return definition.runId!
+    })
+    await startBlueprintAutomation()
+    expect(useBlueprintAutomation.getState()).toMatchObject({ active: false, error: true })
+    expect(useBlueprintAutomation.getState().message).toContain('生成蓝图')
+    expect(useBlueprintAutomation.getState().message).toContain('HTTP 429')
+    expect(useBlueprintAutomation.getState().message).toContain('配额或余额')
+  })
+
   it('没有实际保存完整批次时停止，防止无限调用', async () => {
     mocks.generate.mockResolvedValue([])
     await startBlueprintAutomation()

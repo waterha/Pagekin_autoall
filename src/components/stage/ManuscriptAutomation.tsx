@@ -30,6 +30,7 @@ export default function ManuscriptAutomation() {
       {active ? state.phase === 'retrying' ? text(`第 ${state.chapter ?? '—'} 章 · 自动重试失败步骤（${state.retryAttempt}/3）`, `Chapter ${state.chapter ?? '—'} · Retrying failed steps (${state.retryAttempt}/3)`)
         : text(`第 ${state.chapter ?? '—'} 章 · ${labels[state.phase]}`, `Chapter ${state.chapter ?? '—'} · ${labels[state.phase]}`)
         : matches && state.message ? state.message : text('自动采纳全部审稿意见，逐章定稿', 'Accept all review issues and finalize each chapter')}
+      {active && state.phase === 'retrying' && state.message && <>{'\n'}{state.message}</>}
     </span>
   </div>
 }

@@ -101,7 +101,7 @@
 .manuscript-automation-button:hover { background: var(--sunken); }
 .manuscript-automation-button:focus-visible { box-shadow: var(--focus-ring); }
 .manuscript-automation-button:disabled { opacity: .55; cursor: default; }
-.manuscript-automation-status { font-size: 11px; line-height: 1.5; color: var(--ink-2); overflow-wrap: anywhere; }
+.manuscript-automation-status { font-size: 11px; line-height: 1.5; color: var(--ink-2); overflow-wrap: anywhere; white-space: pre-line; }
 .manuscript-automation-status[data-error] { color: var(--danger); }
 
 .stage-row[aria-current='page'] .stage-row-name {

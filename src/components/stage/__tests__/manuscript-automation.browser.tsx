@@ -61,4 +61,14 @@ describe('正文自动化入口', () => {
     await userEvent.click(host.querySelector('button')!)
     expect(actions.stop).toHaveBeenCalledOnce()
   })
+
+  it('自动重试时同时显示上次失败的环节和原因', async () => {
+    await act(async () => useManuscriptAutomation.setState({ session, active: true, chapter: 34, phase: 'retrying', retryAttempt: 1,
+      message: '章节要点：读取响应流超时。\n诊断码：UND_ERR_BODY_TIMEOUT' }))
+    const status = host.querySelector('[role=status]')!
+    expect(status.textContent).toContain('第 34 章 · 自动重试失败步骤（1/3）')
+    expect(status.textContent).toContain('章节要点：读取响应流超时。')
+    expect(status.textContent).toContain('UND_ERR_BODY_TIMEOUT')
+    expect(host.querySelector('button')!.disabled).toBe(false)
+  })
 })

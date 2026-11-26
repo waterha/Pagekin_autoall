@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { displayedErrorMessage } from '../i18n/app-errors'
+import { workflowFailureMessage } from './workflow-failure-presentation'
 import { localize } from '../i18n/core'
 import type { ProjectSessionContext } from '../shared/ipc-channels'
 import { sameProjectSessionContext } from '../shared/project-session-context'
@@ -167,7 +168,7 @@ export async function startOutlineAutomation(): Promise<void> {
         check()
         const completed = useWorkflowStore.getState().history.find(item => item.id === runId)
         if (completed?.status === 'cancelled') throw new AutomationStopped()
-        if (completed?.status !== 'completed') throw new Error(completed?.error || text('本批大纲未完成，自动化已停止。', 'This outline batch did not complete. Automation stopped.'))
+        if (completed?.status !== 'completed') throw new Error(completed ? workflowFailureMessage(completed, locale) : text('本批大纲未完成，自动化已停止。', 'This outline batch did not complete. Automation stopped.'))
         const saved = await read()
         if (saved.checkpoint?.synopsis_incomplete === true
           || (saved.progress.kind !== 'partial' && saved.progress.kind !== 'complete')
@@ -195,8 +196,8 @@ export async function startOutlineAutomation(): Promise<void> {
           `Automatic recovery failed after ${MAX_RECOVERY_RETRIES} retries. Outlines and recovery drafts were preserved. ${displayedErrorMessage(locale, error)}`))
         retries++
         useOutlineAutomation.setState({ phase: 'retrying', message: text(
-          `检测到生成或保存中断，正在自动恢复并重试（${retries}/${MAX_RECOVERY_RETRIES}）…`,
-          `Generation or saving was interrupted. Automatically recovering and retrying (${retries}/${MAX_RECOVERY_RETRIES})…`) })
+          `检测到生成或保存中断，正在自动恢复并重试（${retries}/${MAX_RECOVERY_RETRIES}）…\n${displayedErrorMessage(locale, error)}`,
+          `Generation or saving was interrupted. Automatically recovering and retrying (${retries}/${MAX_RECOVERY_RETRIES})…\n${displayedErrorMessage(locale, error)}`) })
         const controller = new AbortController()
         retryController = controller
         try {

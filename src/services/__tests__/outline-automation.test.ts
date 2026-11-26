@@ -378,6 +378,7 @@ describe('情节大纲自动化', () => {
     const running = startOutlineAutomation()
     await vi.advanceTimersByTimeAsync(0)
     expect(useOutlineAutomation.getState().phase).toBe('retrying')
+    expect(useOutlineAutomation.getState().message).toContain('NETWORK_ERROR')
     stopOutlineAutomation()
     await running
     await vi.runAllTimersAsync()

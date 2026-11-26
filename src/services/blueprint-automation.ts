@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { displayedErrorMessage } from '../i18n/app-errors'
+import { workflowFailureMessage } from './workflow-failure-presentation'
 import { localize } from '../i18n/core'
 import type { ProjectSessionContext } from '../shared/ipc-channels'
 import { sameProjectPathKey, sameProjectSessionContext } from '../shared/project-session-context'
@@ -118,7 +119,7 @@ export async function startBlueprintAutomation(): Promise<void> {
       check()
       const completed = useWorkflowStore.getState().history.find(item => item.id === runId)
       if (completed?.status === 'cancelled') throw new AutomationStopped()
-      if (completed?.status !== 'completed') throw new Error(completed?.error || text('本批蓝图规划未完成，自动化已停止。', 'This blueprint batch did not complete. Automation stopped.'))
+      if (completed?.status !== 'completed') throw new Error(completed ? workflowFailureMessage(completed, locale) : text('本批蓝图规划未完成，自动化已停止。', 'This blueprint batch did not complete. Automation stopped.'))
       const saved = new Set((await invoke(session, 'db:blueprint-get-all', path)).map(item => item.chapterNumber))
       for (let chapter = start; chapter <= end; chapter++) {
         if (!saved.has(chapter)) throw new Error(text(`第 ${chapter} 章蓝图未保存，自动化已停止，请检查本批结果。`, `Chapter ${chapter}'s blueprint was not saved. Automation stopped; check this batch.`))

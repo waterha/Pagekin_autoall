@@ -76,7 +76,7 @@ describe('讨论区 #77：上下文超长码在每条消费路径上都保留', 
     await runtime.execute(async ({ session }) => {
       await expect(session.complete({ purpose: 'import-global-facts', output: 'structured-data', messages: [] })).rejects.toMatchObject({ code: CODE })
     })
-    expect(setGenerationActivity).toHaveBeenLastCalledWith({ operation: 'import-global-facts', diagnostics })
+    expect(setGenerationActivity).toHaveBeenLastCalledWith(expect.objectContaining({ operation: 'import-global-facts', diagnostics, finishReason: 'error', failureCode: CODE }))
     vi.unstubAllGlobals()
   })
 
@@ -97,7 +97,7 @@ describe('讨论区 #77：上下文超长码在每条消费路径上都保留', 
         importSlot: { runId: 'import-run', stage: 'global', batchId: 'done' } } },
     { read: vi.fn(async () => view), subscribe: vi.fn(() => () => {}) } as unknown as ReturnType<typeof createMainGenerationTransport>)
     await runtime.execute(async ({ session }) => { await session.complete({ purpose: 'import-global-facts', output: 'structured-data', messages: [] }) })
-    expect(setGenerationActivity).toHaveBeenLastCalledWith({ operation: 'import-global-facts', diagnostics })
+    expect(setGenerationActivity).toHaveBeenLastCalledWith(expect.objectContaining({ operation: 'import-global-facts', diagnostics, finishReason: 'stop', failureCode: undefined }))
     vi.unstubAllGlobals()
   })
 

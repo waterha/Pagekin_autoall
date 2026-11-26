@@ -274,6 +274,23 @@ describe('运行侧页', () => {
     expect(resumeWorkflow).toHaveBeenCalledWith('5')
   })
 
+  it('写稿失败时在运行卡片直接展示 HTTP 状态、诊断码和请求情况', async () => {
+    useWorkflowStore.setState({ history: [run('34', 'failed', { failureCode: 'error', error: 'AI 未正常完成生成，结果未被保存。',
+      steps: [{ id: 'write', name: '写稿', description: '', status: 'failed', logs: [], generationActivity: {
+        operation: 'generate-draft', finishReason: 'error', failureCode: 'GENERATION_PROVIDER_FAILED', diagnostics: {
+          startedAt: 0, elapsedMs: 1600, firstResponseMs: null, lastResponseMs: null, lastOutputMs: null,
+          phase: 'response', endReason: 'failed', httpStatus: 401, errorCode: 'HTTP_ERROR', visibleEvents: 0, reasoningEvents: 0,
+        },
+      } }],
+    })] })
+    await render()
+    expect(host!.textContent).toContain('HTTP 401')
+    expect(host!.textContent).toContain('身份验证失败，请检查 API Key')
+    expect(host!.textContent).toContain('GENERATION_PROVIDER_FAILED / HTTP_ERROR')
+    expect(host!.textContent).toContain('模型结束原因：error')
+    expect(host!.textContent).toContain('没有收到可见正文')
+  })
+
   it('批量暂停时这一批只在进行中的运行卡片里出现，运行结束后才列为可恢复', async () => {
     batches = [{ batchId: '批次', range: { startChapter: 3, endChapter: 5 }, completedChapters: [{ chapterNumber: 3 }], nextChapterNumber: 4,
       sourceCurrent: true, rootHandle: { projectId: session.projectId, epoch: session.leaseId, rootActionId: '根', runId: '批量' } }]

@@ -227,6 +227,25 @@ describe('正文自动化', () => {
     expect(useManuscriptAutomation.getState()).toMatchObject({ active: false, error: true, message: expect.stringContaining('模拟执行失败') })
   })
 
+  it('停止时展示本次失败运行的具体诊断，不吞掉网络错误码', async () => {
+    vi.mocked(useWorkflowStore.getState().startWorkflow).mockImplementationOnce(async definition => {
+      useWorkflowStore.setState({ history: [{ id: definition.runId, title: definition.title, status: 'failed',
+        error: 'AI 未正常完成生成，结果未被保存。', failureCode: 'error', currentStepIndex: 0,
+        steps: [{ name: '写稿', status: 'failed', generationActivity: { operation: 'generate-draft', failureCode: 'NETWORK_ERROR',
+          diagnostics: { startedAt: 0, elapsedMs: 90000, firstResponseMs: null, lastResponseMs: null, lastOutputMs: null,
+            phase: 'request', endReason: 'failed', visibleEvents: 0, reasoningEvents: 0, causeCode: 'UND_ERR_CONNECT_TIMEOUT' } } }],
+      } as never] })
+      return definition.runId!
+    })
+    await startManuscriptAutomation()
+    const state = useManuscriptAutomation.getState()
+    expect(state).toMatchObject({ active: false, error: true })
+    expect(state.message).toContain('第 1 章')
+    expect(state.message).toContain('等待服务响应超时')
+    expect(state.message).toContain('UND_ERR_CONNECT_TIMEOUT')
+    expect(commands.review).not.toHaveBeenCalled()
+  })
+
   it('停止与重复点击不会启动额外运行', async () => {
     let release!: () => void
     const pendingReview = new Promise<void>(resolve => { release = resolve })
@@ -492,6 +511,7 @@ describe('正文自动化', () => {
     expect(commands.write).not.toHaveBeenCalled()
     expect(drafts.get(10)!.status).toBe('finalized')
     expect(useManuscriptAutomation.getState()).toMatchObject({ active: false, error: true, message: expect.stringContaining('重试 3 轮') })
+    expect(useManuscriptAutomation.getState().message).toContain('章节要点：')
   })
 
   it('第二轮恢复成功后自动继续', async () => {

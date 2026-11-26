@@ -1,11 +1,12 @@
 import { create } from 'zustand'
 import { displayedErrorMessage } from '../i18n/app-errors'
+import { workflowFailureMessage } from './workflow-failure-presentation'
 import { localize } from '../i18n/core'
 import type { AllInvokeChannels, ProjectSessionContext } from '../shared/ipc-channels'
 import { sameProjectPathKey, sameProjectSessionContext } from '../shared/project-session-context'
 import { countDraftUnits } from '../shared/draft-units'
 import { parseChapterGoalReview } from '../shared/chapter-goal-review'
-import { planFinalizationRetry } from '../shared/finalization-step-error'
+import { describeFinalizationStepError, planFinalizationRetry } from '../shared/finalization-step-error'
 import { isOpenReopenDraft } from '../shared/chapter-reopen'
 import { createHumanConfirmedReviewSnapshot, serializeHumanConfirmedReviewSnapshot, type HumanConfirmedReviewItem } from '../shared/human-confirmed-review'
 import { captureProjectSession, isProjectSessionCurrent } from '../components/project-session-gate'
@@ -76,7 +77,7 @@ export async function startManuscriptAutomation(): Promise<void> {
     check()
     return result
   }
-  const phase = (value: Phase) => { check(); useManuscriptAutomation.setState({ phase: value }) }
+  const phase = (value: Phase) => { check(); useManuscriptAutomation.setState({ phase: value, message: '' }) }
   const draftTabs = (draft: Draft) => useEditorStore.getState().tabs.filter(tab => tab.type === 'chapter'
       && sameProjectPathKey(tab.projectKey, path) && (tab.draftId === draft.id || tab.filePath === `ai-novel://draft/${draft.id}`))
   const assertEditorUnchanged = (draft: Draft) => {
@@ -104,7 +105,7 @@ export async function startManuscriptAutomation(): Promise<void> {
       check()
       const completed = useWorkflowStore.getState().history.find(item => item.id === runId)
       if (completed?.status === 'cancelled') throw new AutomationStopped()
-      if (completed?.status !== 'completed') throw new Error(completed?.error || text('正文自动化步骤未完成，已停止。', 'The automation step did not complete. Automation stopped.'))
+      if (completed?.status !== 'completed') throw new Error(completed ? workflowFailureMessage(completed, locale) : text('正文自动化步骤未完成，已停止。', 'The automation step did not complete. Automation stopped.'))
       return data
     } finally { activeRunId = undefined }
   }
@@ -198,6 +199,9 @@ export async function startManuscriptAutomation(): Promise<void> {
       return { plan, failed: steps.filter(step => !step.ok && !plan.retired.has(step.stepKey)) }
     }
     if (!unfinished().failed.length) return false
+    const failureDetails = () => unfinished().failed.map(step => `${step.label}：${displayedErrorMessage(locale,
+      describeFinalizationStepError(step.errorMsg || text('未完成，未记录具体原因。', 'Incomplete; no specific cause was recorded.'), text))}`).join('\n')
+    let lastFailure = ''
     const source = await invoke(session, 'db:continuity-read-source', draftId, path)
     if (source.status !== 'valid' || source.snapshot.source.chapterNumber !== chapter
       || (expectedContent !== undefined && source.snapshot.content !== expectedContent)
@@ -219,17 +223,18 @@ export async function startManuscriptAutomation(): Promise<void> {
       const { plan, failed } = unfinished()
       if (!failed.length) return true
       if (!plan.card.length) throw new Error(text(
-        `定稿后处理有无法自动重试的步骤：${failed.map(step => step.label).join('、')}。请按后处理页面的说明处理。`,
-        `Some post-finalization steps cannot be retried automatically: ${failed.map(step => step.label).join(', ')}. Follow the notes on the post-processing page.`))
+        `定稿后处理有无法自动重试的步骤：${failed.map(step => step.label).join('、')}。请按后处理页面的说明处理。\n${failureDetails()}`,
+        `Some post-finalization steps cannot be retried automatically: ${failed.map(step => step.label).join(', ')}. Follow the notes on the post-processing page.\n${failureDetails()}`))
       await assertSource()
       phase('retrying')
-      useManuscriptAutomation.setState({ retryAttempt: attempt })
+      useManuscriptAutomation.setState({ retryAttempt: attempt, message: [failureDetails(), lastFailure].filter(Boolean).join('\n') })
       try {
         // This is the same action as the chapter card's Retry failed steps button.
         await run(createRepairFinalizeWorkflow(chapter, path, session, undefined, source.snapshot.source))
       } catch (error) {
         check()
         if (error instanceof AutomationStopped) throw error
+        lastFailure = displayedErrorMessage(locale, error)
         // The durable step results decide whether another retry is useful.
       }
       await assertSource()
@@ -239,8 +244,8 @@ export async function startManuscriptAutomation(): Promise<void> {
     }
     const { failed } = unfinished()
     if (failed.length) throw new Error(text(
-      `定稿后处理自动重试 ${MAX_POST_PROCESS_RETRIES} 轮仍未完成：${failed.map(step => step.label).join('、')}。已定稿正文和成功步骤已保留，请检查后重新开启正文自动化。`,
-      `Post-processing is still incomplete after ${MAX_POST_PROCESS_RETRIES} automatic retries: ${failed.map(step => step.label).join(', ')}. Finalized text and successful steps were preserved. Check the failure before restarting automation.`))
+      `定稿后处理自动重试 ${MAX_POST_PROCESS_RETRIES} 轮仍未完成：${failed.map(step => step.label).join('、')}。已定稿正文和成功步骤已保留，请检查后重新开启正文自动化。\n${failureDetails()}${lastFailure ? `\n${lastFailure}` : ''}`,
+      `Post-processing is still incomplete after ${MAX_POST_PROCESS_RETRIES} automatic retries: ${failed.map(step => step.label).join(', ')}. Finalized text and successful steps were preserved. Check the failure before restarting automation.\n${failureDetails()}${lastFailure ? `\n${lastFailure}` : ''}`))
     return true
   }
 
@@ -409,7 +414,7 @@ export async function startManuscriptAutomation(): Promise<void> {
   } catch (error) {
     useManuscriptAutomation.setState({ error: !(error instanceof AutomationStopped), message: error instanceof AutomationStopped
       ? text('正文自动化已停止，已生成的内容已保留。', 'Automation stopped. Generated content was preserved.')
-      : displayedErrorMessage(locale, error) })
+      : text(`第 ${useManuscriptAutomation.getState().chapter ?? '—'} 章 · ${displayedErrorMessage(locale, error)}`, `Chapter ${useManuscriptAutomation.getState().chapter ?? '—'} · ${displayedErrorMessage(locale, error)}`) })
   } finally {
     activeRunId = undefined
     // Never allow an old lease's completion to change a newer mode.

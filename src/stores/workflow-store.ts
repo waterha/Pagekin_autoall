@@ -18,7 +18,7 @@ import {
   promptBudgetFailureFromError,
   type PromptBudgetFailureCode,
 } from '../services/generation/prompt-budget-failure'
-import type { PromptBudgetReport } from '../services/generation/generation-harness'
+import type { GenerationAttemptReceipt, PromptBudgetReport } from '../services/generation/generation-harness'
 import {
   isProjectSessionContext,
   projectSessionContextFromProject,
@@ -72,7 +72,12 @@ export interface WorkflowStep {
   failureCode?: WorkflowFailureCode
   /** Safe structured byte attribution for a prompt-budget preflight failure. */
   promptBudgetReport?: PromptBudgetReport
-  generationActivity?: { operation: string; diagnostics?: GenerationTransportDiagnostics }
+  generationActivity?: {
+    operation: string
+    diagnostics?: GenerationTransportDiagnostics
+    finishReason?: GenerationAttemptReceipt['finishReason']
+    failureCode?: GenerationAttemptReceipt['failureCode']
+  }
   startedAt?: string
   completedAt?: string
   lastProgressAt?: string

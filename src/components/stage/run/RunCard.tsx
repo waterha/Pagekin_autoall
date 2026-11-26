@@ -283,6 +283,7 @@ function RunFailureNotice({ run, primary }: { run: WorkflowRun; primary: boolean
     <Notice tone="danger" title={presentation.heading}>
       <p>{presentation.reason}</p>
       {errorCode && <p className="run-note">{text('错误码：', 'Error code: ')}{errorCode}</p>}
+      {presentation.details?.map(detail => <p className="run-note" key={detail}>{detail}</p>)}
       {presentation.persistence && <p>{presentation.persistence}</p>}
       {presentation.guidance && <p>{presentation.guidance}</p>}
       {canResumeOutline && (
