@@ -827,15 +827,25 @@ export class GenerationRunRepository {
                 active_since_ms: number | null;
             }[];
             const now = this.now();
+            // Read the large run table once. Updating by root used to rescan it
+            // for every historical root and rewrite already-paused frozen JSON.
+            const pendingRuns = new Map<string, string[]>();
+            for (const run of this.db().prepare("SELECT run_id,root_action_id FROM generation_runs WHERE status<>'paused'").all() as { run_id: string; root_action_id: string }[]) {
+                const ids = pendingRuns.get(run.root_action_id) ?? [];
+                ids.push(run.run_id); pendingRuns.set(run.root_action_id, ids);
+            }
             for (const row of roots) {
                 const id = row.root_action_id;
-                if (isFrozenRoot(id)) continue;
                 const root = JSON.parse(row.action_json) as GenerationBudgetReceipt['root'];
                 if (['cancelled', 'sealed'].includes(root.status)) continue;
+                const runIds = pendingRuns.get(id) ?? [];
+                if (root.status === 'paused' && row.active_since_ms === null && !runIds.length) continue;
+                if (isFrozenRoot(id)) continue;
+                const needsPause = root.status !== 'paused' || row.active_since_ms !== null;
                 root.status = 'paused';
                 const elapsed = row.active_elapsed_ms + (row.active_since_ms === null ? 0 : Math.max(0, now - row.active_since_ms));
-                this.db().prepare('UPDATE generation_roots SET action_json=?,active_elapsed_ms=?,active_since_ms=NULL WHERE root_action_id=?').run(encode(root), elapsed, id);
-                this.db().prepare('UPDATE generation_runs SET status=? WHERE root_action_id=?').run('paused', id);
+                if (needsPause) this.db().prepare('UPDATE generation_roots SET action_json=?,active_elapsed_ms=?,active_since_ms=NULL WHERE root_action_id=?').run(encode(root), elapsed, id);
+                for (const runId of runIds) this.db().prepare('UPDATE generation_runs SET status=? WHERE run_id=?').run('paused', runId);
             }
         });
     }

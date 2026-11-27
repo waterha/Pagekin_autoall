@@ -3,6 +3,7 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { CANONICAL_PROJECT_DATABASE, CANONICAL_PROJECT_DIRECTORY, parseCanonicalProjectManifest } from '../../src/shared/project-format'
 import { openProjectSqlite, verifyProjectSqlite, type SqliteContentIdentity } from './sqlite-project-migration'
+import { runProjectOpenWorker } from './project-open-worker-client'
 
 const admitted = new Map<string, { root: string; manifestHash: string }>()
 const key = (root: string) => process.platform === 'win32' ? path.resolve(root).toLowerCase() : path.resolve(root)
@@ -64,6 +65,16 @@ export function deactivateProjectData(projectPath: string): void { admitted.dele
 export function openCanonicalProjectData(projectPath: string): SqliteContentIdentity {
   const before = manifestState(projectPath)
   const verified = openProjectSqlite({ databasePath: path.join(before.root, CANONICAL_PROJECT_DATABASE) })
+  const after = manifestState(projectPath)
+  if (before.manifestHash !== after.manifestHash) throw new Error('PROJECT_MANIFEST_CHANGED')
+  admitted.set(key(projectPath), before)
+  return verified
+}
+
+/** Keep the manifest gate and exact verifier; only their expensive execution moves off the UI thread. */
+export async function openCanonicalProjectDataAsync(projectPath: string): Promise<SqliteContentIdentity> {
+  const before = manifestState(projectPath)
+  const verified = await runProjectOpenWorker('open', path.join(before.root, CANONICAL_PROJECT_DATABASE))
   const after = manifestState(projectPath)
   if (before.manifestHash !== after.manifestHash) throw new Error('PROJECT_MANIFEST_CHANGED')
   admitted.set(key(projectPath), before)

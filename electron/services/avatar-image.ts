@@ -1,4 +1,4 @@
-import { nativeImage } from 'electron'
+import * as electron from 'electron'
 
 export const AVATAR_MAX_EDGE = 256
 export const AVATAR_JPEG_QUALITY = 82
@@ -27,7 +27,7 @@ export function avatarMime(extension: AvatarImageExtension): 'image/png' | 'imag
 export function compressAvatarImage(bytes: Buffer, extension: AvatarImageExtension): CompressedAvatar {
   const unchanged = (): CompressedAvatar => ({ bytes, extension })
   try {
-    const image = nativeImage.createFromBuffer(bytes)
+    const image = electron.nativeImage.createFromBuffer(bytes)
     if (!image || image.isEmpty()) return unchanged()
     const { width, height } = image.getSize()
     if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return unchanged()

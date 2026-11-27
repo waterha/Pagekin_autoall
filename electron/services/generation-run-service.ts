@@ -69,6 +69,8 @@ export interface GenerationRunServiceDependencies {
         durableRevision: number;
         storageFailed: boolean;
         diagnostics?: GenerationTransportDiagnostics;
+        /** Already admitted in-flight receipt, with only acknowledged artifact updates. */
+        receipt: GenerationExecutionReceipt;
     }) => void;
     validateRecovery?: (previous: RunBinding, next: RunBinding) => Promise<boolean>;
 }
@@ -154,7 +156,7 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
             const notify = () => { try {
                 clearTimeout(displayTimer);
                 displayTimer = undefined;
-                deps.onSnapshot?.({ attemptId, visibleText: text, durableText: durable, durableRevision: revision, storageFailed, diagnostics });
+                deps.onSnapshot?.({ attemptId, visibleText: text, durableText: durable, durableRevision: revision, storageFailed, diagnostics, receipt });
             }
             catch { /* UI notification cannot alter durable accounting */ } };
             // A stream can emit thousands of tiny text/diagnostic events. Each display
@@ -170,6 +172,7 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
                     const artifact = deps.repository.snapshot(attemptId, revision, text);
                     revision = artifact.revision;
                     durable = artifact.text;
+                    receipt = { ...receipt, artifact };
                 }
                 catch {
                     storageFailed = true;
@@ -197,6 +200,7 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
             try {
                 try {
                     deps.repository.markDispatched(attemptId);
+                    receipt = { ...receipt, attempt: { ...receipt.attempt, status: 'dispatch-marked' } };
                 }
                 catch (error) {
                     storageFailed = true;

@@ -328,7 +328,9 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
     },
     onSnapshot: event => {
       if (closed || event.storageFailed) return
-      const snapshot = snapshotOf(repository.receipt(event.attemptId))
+      // Display heartbeats must not reload the book-sized frozen binding. The
+      // service supplies its admitted receipt and CAS-acknowledged artifact.
+      const snapshot = snapshotOf(event.receipt)
       if (snapshot) deps.onSnapshot?.({ ...snapshot, ...(event.diagnostics ? { diagnostics: event.diagnostics } : {}) })
     },
   })

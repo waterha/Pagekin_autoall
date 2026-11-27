@@ -11,8 +11,9 @@ import { CURRENT_DESKTOP_SCHEMA_VERSION, getDesktopMigrationRegistry } from './m
 import { SchemaMigrationError } from './migrations/registry'
 import { migrateSchema } from './migrations/runner'
 import { SqliteSchemaAdapter } from './migrations/sqlite-schema-adapter'
-import { openCanonicalProjectData, deactivateProjectData, getNewProjectDatabasePath, getProjectDatabasePath } from './services/project-data-locator'
+import { openCanonicalProjectData, openCanonicalProjectDataAsync, deactivateProjectData, getNewProjectDatabasePath, getProjectDatabasePath } from './services/project-data-locator'
 import { readSqliteContentIdentity } from './services/sqlite-project-migration'
+import { runProjectOpenWorker } from './services/project-open-worker-client'
 
 const require = createRequire(import.meta.url)
 const Database = require('better-sqlite3') as typeof import('better-sqlite3')
@@ -56,6 +57,30 @@ export function initProjectDatabase(projectPath: string): void {
   }
 }
 
+/** Leave the currently published connection alone until every async admission check has passed. */
+export async function initProjectDatabaseAsync(projectPath: string): Promise<void> {
+  let database: BetterSqlite3.Database | undefined
+  try {
+    const verified = await openCanonicalProjectDataAsync(projectPath)
+    const databasePath = getProjectDatabasePath(projectPath)
+    database = new Database(databasePath, { fileMustExist: true })
+    // The unopened writable handle has not touched WAL/SHM. Verify the exact bytes
+    // in a worker, then publish and fence synchronously so no half-open DB leaks.
+    const content = await runProjectOpenWorker('identity', databasePath)
+    if (content.database !== verified.database || content.wal !== verified.wal) throw new SchemaMigrationError('SOURCE_CHANGED_SINCE_PROBE')
+    closeDatabase(projectPath)
+    database.pragma('journal_mode = WAL')
+    database.pragma('foreign_keys = ON')
+    fenceProjectSession(database)
+    projectDb = database
+    currentProjectPath = projectPath
+  } catch (error) {
+    database?.close()
+    if (currentProjectPath !== projectPath) deactivateProjectData(projectPath)
+    throw error
+  }
+}
+
 export interface ProjectDatabaseBeforeCloseContext { projectPath: string; database: BetterSqlite3.Database }
 const beforeCloseListeners = new Set<(context: ProjectDatabaseBeforeCloseContext) => void>()
 let notifyingBeforeClose = false
@@ -69,6 +94,10 @@ export function onProjectDatabaseBeforeClose(listener: (context: ProjectDatabase
 
 /** 关闭项目数据库 */
 export function closeProjectDatabase(): void {
+  closeDatabase()
+}
+
+function closeDatabase(preserveAdmission?: string): void {
   if (notifyingBeforeClose) throw new Error('PROJECT_DATABASE_CLOSE_REENTRANT')
   if (projectDb && currentProjectPath) {
     notifyingBeforeClose = true
@@ -89,7 +118,7 @@ export function closeProjectDatabase(): void {
   const closingProjectPath = currentProjectPath
   projectDb = null
   currentProjectPath = null
-  if (closingProjectPath) deactivateProjectData(closingProjectPath)
+  if (closingProjectPath && closingProjectPath !== preserveAdmission) deactivateProjectData(closingProjectPath)
   closingDatabase?.close()
 }
 

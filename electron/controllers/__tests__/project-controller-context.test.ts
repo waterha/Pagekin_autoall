@@ -105,6 +105,16 @@ vi.mock('../../database', () => ({
     }
     mocks.currentProjectPath = resolved
   }),
+  initProjectDatabaseAsync: vi.fn((projectPath: string) => {
+    const resolved = path.resolve(projectPath)
+    mocks.initCalls.push(resolved)
+    // Mirrors the production initializer's `.vela/vela.db` parent creation.
+    mocks.createdVelaDirectories.add(path.join(resolved, '.vela'))
+    if (mocks.failInitPaths.has(resolved)) {
+      throw new Error(`cannot initialize ${resolved}`)
+    }
+    mocks.currentProjectPath = resolved
+  }),
 }))
 
 vi.mock('../../vector-store', () => ({

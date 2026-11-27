@@ -22,6 +22,7 @@ import {
   getCurrentProjectPath,
   getProjectDb,
   initProjectDatabase,
+  initProjectDatabaseAsync,
 } from '../database'
 import { closeConnection as closeVectorConnection } from '../vector-store'
 import { externalFileGrants } from '../services/external-file-grant-service'
@@ -628,7 +629,7 @@ export function registerProjectController(options: ProjectControllerOptions = {}
         if (recent?.projectId && recent.projectId !== trustedProject.projectId) {
           throw new Error('PROJECT_OPEN_RECENT_IDENTITY_CHANGED')
         }
-        initProjectDatabase(resolvedProjectPath)
+        await initProjectDatabaseAsync(resolvedProjectPath)
         const openedDatabase = getProjectDb()
         if (openedDatabase) adoptTransferredCharacterContinuityOnOpen({ database: openedDatabase,
           projectRoot: resolvedProjectPath, projectId: trustedProject.projectId })

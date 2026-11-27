@@ -27,9 +27,11 @@ export default defineConfig({
         build: {
           // 强制输出 CommonJS，保证 better-sqlite3 等 native 模块能正常加载
           rollupOptions: {
+            input: { main: 'electron/main.ts', 'project-open-worker': 'electron/services/project-open-worker.ts' },
             external: ['better-sqlite3', '@lancedb/lancedb', 'yauzl'],
             output: {
-              format: 'cjs'
+              format: 'cjs',
+              entryFileNames: '[name].js',
             }
           }
         }

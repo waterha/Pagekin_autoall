@@ -25,6 +25,40 @@ function fixture() {
 }
 const usage: GenerationProviderUsage = { promptTokens: 50, completionTokens: 50, totalTokens: 100, reasoningTokens: 20, accounting: 'included-in-completion', totalIncludesReasoning: true, trusted: true };
 describe('single durable generation owner', () => {
+    it('does not rewrite already paused history or rescan the run table once per root on reopen', () => {
+        const f = fixture();
+        for (let i = 0; i < 25; i++) f.repository.open({ ...f.open, uiActionNonce: `book-${i}` });
+        f.repository.recoverInterrupted();
+        const changes = f.db.prepare('SELECT total_changes()').pluck().get();
+        f.repository.recoverInterrupted();
+        expect(f.db.prepare('SELECT total_changes()').pluck().get()).toBe(changes);
+        expect(f.db.prepare("SELECT count(*) FROM generation_runs WHERE status='paused'").pluck().get()).toBe(25);
+    });
+    it('projects live heartbeats from the admitted receipt without rereading frozen book sources', async () => {
+        vi.useFakeTimers();
+        const f = fixture(), snapshots: Parameters<NonNullable<Parameters<typeof createGenerationRunService>[0]['onSnapshot']>>[0][] = [];
+        let callbacks!: Parameters<Parameters<typeof createGenerationRunService>[0]['dispatch']>[1];
+        let finish!: (value: { usage: typeof usage; finishReason: string }) => void;
+        const service = createGenerationRunService({ repository: f.repository, onSnapshot: event => snapshots.push(event),
+            dispatch: async (_request, options) => { callbacks = options; return new Promise(resolve => { finish = resolve; }); } });
+        const run = service.open(f.open), running = service.execute(f.request(run.runId));
+        const read = vi.spyOn(f.repository, 'receipt');
+        for (let i = 0; i < 5; i++) {
+            callbacks.onDiagnostics?.({ startedAt: 0, elapsedMs: i * 100, firstResponseMs: null, lastResponseMs: null,
+                lastOutputMs: null, phase: 'stream', visibleEvents: 0, reasoningEvents: i });
+            await vi.advanceTimersByTimeAsync(100);
+        }
+        expect(read).not.toHaveBeenCalled();
+        expect(snapshots).toHaveLength(5);
+        expect(snapshots[0].receipt.attempt.status).toBe('dispatch-marked');
+        callbacks.onVisible({ kind: 'delta', text: '已生成正文' });
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(snapshots.at(-1)!.receipt.artifact?.text).toBe('已生成正文');
+        expect(snapshots.at(-1)!.receipt.artifact?.revision).toBe(1);
+        expect(snapshots.at(-1)!.durableRevision).toBe(1);
+        finish({ usage, finishReason: 'stop' });
+        expect((await running).artifact?.text).toBe('已生成正文');
+    });
     it('coalesces rapid display notifications without delaying durable checkpoints or losing the last snapshot', async () => {
         const f = fixture(), onSnapshot = vi.fn(event => f.repository.receipt(event.attemptId));
         const service = createGenerationRunService({ repository: f.repository, onSnapshot,
