@@ -51,6 +51,18 @@ let openProjectRequestSequence = 0
 let recentProjectsRequestSequence = 0
 let closeProjectInFlight: Promise<boolean> | null = null
 let projectRecoveryInFlight: Promise<void> | null = null
+let latestProjectOpen: { key: string; promise: Promise<boolean> } | null = null
+
+/** Repeated clicks while a large book is verifying belong to the same open. */
+function shareProjectOpen(target: ProjectOpenTarget, open: () => Promise<boolean>): Promise<boolean> {
+  const key = typeof target === 'string' ? projectPathKey(target) ?? `path:${target}` : `grant:${target.grantId}`
+  if (latestProjectOpen?.key === key) return latestProjectOpen.promise
+  const promise = open().finally(() => {
+    if (latestProjectOpen?.promise === promise) latestProjectOpen = null
+  })
+  latestProjectOpen = { key, promise }
+  return promise
+}
 
 type ProjectTransitionDecision = 'clean' | 'saved' | 'discard'
 type PreparedProjectTransition = Readonly<{
@@ -589,7 +601,7 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
   },
 
 
-  openProject: async (target) => {
+  openProject: (target) => shareProjectOpen(target, async () => {
     const projectPath = typeof target === 'string' ? target : ''
     // 作者点的入口已先确认并收起设置页；外部打开请求、新建后自动打开到这里时设置页可能还开着，换作品会卸载它、丢掉输入。
     // 确认完才领请求序号：确认框开着时被拒的请求不能让还在等确认的那个失效。
@@ -851,7 +863,7 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
     } finally {
       if (isLatestRequest()) set({ loading: false })
     }
-  },
+  }),
 
   importLegacyProject: async (source) => {
     if (get().legacyImportBusy) return false

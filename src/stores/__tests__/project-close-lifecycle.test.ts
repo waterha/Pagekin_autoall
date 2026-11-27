@@ -129,6 +129,49 @@ beforeEach(() => {
   })
 })
 
+it('coalesces repeated clicks on the same book while its background database verification is pending', async () => {
+  const checked = deferred<unknown>()
+  mocks.invoke.mockImplementation(async (channel: string, ...args: unknown[]) => {
+    if (channel === 'project:open') {
+      await checked.promise
+      return { success: true, project: project('B'), requestToken: args[1], activeProjectPath: project('B').path,
+        databaseRestored: true, dbReady: true }
+    }
+    if (channel === 'project:get-runtime-context') return { activeProjectPath: project('B').path, dbReady: true }
+    return []
+  })
+  const first = useProjectStore.getState().openProject(project('B').path)
+  await vi.waitFor(() => expect(mocks.invoke.mock.calls.filter(call => call[0] === 'project:open')).toHaveLength(1))
+  const second = useProjectStore.getState().openProject(project('B').path)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const opens = mocks.invoke.mock.calls.filter(call => call[0] === 'project:open').length
+  checked.resolve(undefined)
+  const results = await Promise.all([first, second])
+  expect(mocks.alertError).not.toHaveBeenCalled()
+  expect(opens).toBe(1)
+  expect(results).toEqual([true, true])
+  expect(useProjectStore.getState().currentProject?.path).toBe(project('B').path)
+})
+
+it('releases a failed shared open so the same book can be opened again', async () => {
+  let attempts = 0
+  mocks.invoke.mockImplementation(async (channel: string, ...args: unknown[]) => {
+    if (channel === 'project:open') {
+      attempts++
+      return attempts === 1
+        ? { success: false, project: null, requestToken: args[1], error: 'GENERATION_SOURCE_CHANGED',
+          activeProjectPath: project('A').path, databaseRestored: true, dbReady: true }
+        : { success: true, project: project('B'), requestToken: args[1], activeProjectPath: project('B').path,
+          databaseRestored: true, dbReady: true }
+    }
+    return []
+  })
+  expect(await useProjectStore.getState().openProject(project('B').path)).toBe(false)
+  expect(await useProjectStore.getState().openProject(project('B').path)).toBe(true)
+  expect(attempts).toBe(2)
+  expect(useProjectStore.getState().currentProject?.path).toBe(project('B').path)
+})
+
 describe('project close lifecycle', () => {
   it('imports a recognized shelf project through its source grant and opens only the new copy', async () => {
     mocks.confirm.mockResolvedValueOnce(true)
