@@ -554,6 +554,19 @@ async function cleanupOwnedTableCreation(
   }
 }
 
+async function withOpenTable<T>(
+  db: lancedb.Connection,
+  tableName: string,
+  operation: (table: lancedb.Table) => Promise<T>,
+): Promise<T> {
+  const table = await db.openTable(tableName)
+  try {
+    return await operation(table)
+  } finally {
+    table.close()
+  }
+}
+
 async function createOwnedEmbeddingTable(
   projectPath: string,
   db: lancedb.Connection,
@@ -573,7 +586,8 @@ async function createOwnedEmbeddingTable(
     // generation be retried without deleting any table that contains data.
     removeEmptyUnregisteredTableDirectory(projectPath, space.tableName)
     try {
-      await db.createTable(space.tableName, recordsForSchema(records, schema), { schema })
+      const table = await db.createTable(space.tableName, recordsForSchema(records, schema), { schema })
+      table.close()
     } catch (error) {
       await cleanupOwnedTableCreation(projectPath, db, space.tableName)
       throw error
@@ -613,10 +627,11 @@ async function appendCanonicalRecords(
   records: ReadonlyArray<ChunkRecord>,
 ): Promise<void> {
   if (!tableNames.includes(TABLE_NAME)) {
-    await db.createTable(TABLE_NAME, recordsForSchema(records, canonicalChunkSchema()), { schema: canonicalChunkSchema() })
+    const table = await db.createTable(TABLE_NAME, recordsForSchema(records, canonicalChunkSchema()), { schema: canonicalChunkSchema() })
+    table.close()
     return
   }
-  await appendCompatibleRecords(await db.openTable(TABLE_NAME), records)
+  await withOpenTable(db, TABLE_NAME, table => appendCompatibleRecords(table, records))
 }
 
 interface EmbeddingWrite {
@@ -635,7 +650,7 @@ async function appendEmbeddingRecords(
 ): Promise<EmbeddingWrite> {
   const existing = matchingSpace(registry, identity, dimension)
   if (existing) {
-    await appendCompatibleRecords(await db.openTable(existing.tableName), records)
+    await withOpenTable(db, existing.tableName, table => appendCompatibleRecords(table, records))
     return { space: existing, tableName: existing.tableName, newlyCreated: false }
   }
 
@@ -664,10 +679,11 @@ async function compensateEmbeddingWrite(
       return
     }
 
-    const table = await db.openTable(write.tableName)
-    for (const recordId of recordIds) {
-      await table.delete(`id = '${recordId.replace(/'/g, "''")}'`)
-    }
+    await withOpenTable(db, write.tableName, async (table) => {
+      for (const recordId of recordIds) {
+        await table.delete(`id = '${recordId.replace(/'/g, "''")}'`)
+      }
+    })
   } catch (error) {
     console.warn(`[AI Novel VectorStore] 补偿嵌入写入 ${write.tableName} 失败:`, error)
   }
@@ -677,8 +693,8 @@ async function completeForCanonicalTable(
   db: lancedb.Connection,
   space: EmbeddingSpace,
 ): Promise<boolean> {
-  const canonicalRows = await (await db.openTable(TABLE_NAME)).query().select(['id']).toArray()
-  const vectorRows = await (await db.openTable(space.tableName)).query().select(['id', 'vector']).toArray()
+  const canonicalRows = await withOpenTable(db, TABLE_NAME, table => table.query().select(['id']).toArray())
+  const vectorRows = await withOpenTable(db, space.tableName, table => table.query().select(['id', 'vector']).toArray())
   const canonicalIds = canonicalRows.map(row => (row as { id?: unknown }).id)
   const vectorIds = vectorRows.map(row => (row as { id?: unknown }).id)
   if (
@@ -700,12 +716,13 @@ async function verifyQueryableEmbeddingSpace(
   db: lancedb.Connection,
   space: EmbeddingSpace,
 ): Promise<boolean> {
-  const table = await db.openTable(space.tableName)
-  const rows = await table.query().select(['vector']).limit(1).toArray()
-  const probe = rows[0] && asNumberArray((rows[0] as { vector?: unknown }).vector)
-  if (!probe || !vectorIsUsable(probe, space.vectorDimension)) return false
-  // 用真实向量做一次最小查询，确保“可读行”不是只有 Arrow schema 表面成立。
-  return (await table.search(probe).limit(1).toArray()).length > 0
+  return withOpenTable(db, space.tableName, async (table) => {
+    const rows = await table.query().select(['vector']).limit(1).toArray()
+    const probe = rows[0] && asNumberArray((rows[0] as { vector?: unknown }).vector)
+    if (!probe || !vectorIsUsable(probe, space.vectorDimension)) return false
+    // 用真实向量做一次最小查询，确保“可读行”不是只有 Arrow schema 表面成立。
+    return (await table.search(probe).limit(1).toArray()).length > 0
+  })
 }
 
 function registryWithActiveGeneration(
@@ -777,7 +794,7 @@ async function finaliseEmbeddingWrite(
 async function canonicalRecordsForEmbeddingRebuild(
   db: lancedb.Connection,
 ): Promise<ChunkRecord[]> {
-  const rows = await (await db.openTable(TABLE_NAME)).query().toArray()
+  const rows = await withOpenTable(db, TABLE_NAME, table => table.query().toArray())
   return rows.map(row => ({ ...(row as Record<string, unknown>) })) as ChunkRecord[]
 }
 
@@ -1018,14 +1035,16 @@ async function writeDocumentInfo(
   docInfo: DocumentInfo,
 ): Promise<void> {
   if (!tableNames.includes(DOCS_TABLE_NAME)) {
-    await db.createTable(DOCS_TABLE_NAME, [docInfo])
+    const table = await db.createTable(DOCS_TABLE_NAME, [docInfo])
+    table.close()
     return
   }
-  const docsTable = await db.openTable(DOCS_TABLE_NAME)
-  await ensureCorpusKindColumn(docsTable)
-  // 先追加。若后续 canonical/vector/catalog 任一步失败，旧同名文档仍然存在，
-  // 回滚也只会删除本次 docId。
-  await docsTable.add([docInfo])
+  await withOpenTable(db, DOCS_TABLE_NAME, async (docsTable) => {
+    await ensureCorpusKindColumn(docsTable)
+    // 先追加。若后续 canonical/vector/catalog 任一步失败，旧同名文档仍然存在，
+    // 回滚也只会删除本次 docId。
+    await docsTable.add([docInfo])
+  })
 }
 
 async function pruneSupersededDocuments(
@@ -1073,15 +1092,16 @@ async function rollbackCurrentWrite(
     const escapedDocId = docId.replace(/'/g, "''")
     for (const tableName of tableNames) {
       try {
-        const table = await db.openTable(tableName)
-        if (tableName === DOCS_TABLE_NAME) {
-          await table.delete(`id = '${escapedDocId}'`)
-        } else if (tableName === TABLE_NAME || tableName.startsWith(EMBEDDING_TABLE_PREFIX)) {
-          // 以本次生成的 chunk id 精确删除，避免触碰同一 docId 的历史数据。
-          for (const chunkId of chunkIds) {
-            await table.delete(`id = '${chunkId.replace(/'/g, "''")}'`)
+        await withOpenTable(db, tableName, async (table) => {
+          if (tableName === DOCS_TABLE_NAME) {
+            await table.delete(`id = '${escapedDocId}'`)
+          } else if (tableName === TABLE_NAME || tableName.startsWith(EMBEDDING_TABLE_PREFIX)) {
+            // 以本次生成的 chunk id 精确删除，避免触碰同一 docId 的历史数据。
+            for (const chunkId of chunkIds) {
+              await table.delete(`id = '${chunkId.replace(/'/g, "''")}'`)
+            }
           }
-        }
+        })
       } catch (error) {
         console.warn(`[AI Novel VectorStore] 回滚 ${tableName} 的本次写入失败:`, error)
       }
@@ -1166,7 +1186,7 @@ async function addChunksInternal(
       const identity = normalizedIdentity(embeddingSpace, validation.dimension)
       const existingSpace = matchingSpace(registry, identity, validation.dimension)
       const canonicalHasRows = tableNames.includes(TABLE_NAME)
-        && await (await db.openTable(TABLE_NAME)).countRows() > 0
+        && (await withOpenTable(db, TABLE_NAME, table => table.countRows())) > 0
       // 普通导入不能把新模型当作“顺手重建”。存在任何已知空间，或已有仅全文
       // 文本但尚未显式回填时，调用方必须进入明确的 rebuild/backfill 流程。
       if (!existingSpace && (registry.spaces.length > 0 || canonicalHasRows)) {
@@ -1250,7 +1270,12 @@ export async function replaceDocumentChunks(projectPath: string, docId: string, 
       const registry = await loadOrRegisterLegacyRegistry(projectPath, db, names)
       for (const name of [TABLE_NAME, DOCS_TABLE_NAME, ...names.filter(name => name.startsWith(EMBEDDING_TABLE_PREFIX))]) {
         const table = await db.openTable(name)
-        opened.push({ table, version: await table.version() })
+        try {
+          opened.push({ table, version: await table.version() })
+        } catch (error) {
+          table.close()
+          throw error
+        }
       }
       const [canonical, documents, ...vectors] = opened
       const filter = `\`docId\` = '${docId.replace(/'/g, "''")}'`
@@ -1292,7 +1317,9 @@ async function removeDocumentInternal(projectPath: string, docId: string): Promi
       ...registry.spaces.map(space => space.tableName),
     ])
     for (const tableName of targets) {
-      if (tableNames.includes(tableName)) await (await db.openTable(tableName)).delete(`\`docId\` = '${escapedId}'`)
+      if (tableNames.includes(tableName)) {
+        await withOpenTable(db, tableName, table => table.delete(`\`docId\` = '${escapedId}'`))
+      }
     }
     // LanceDB cannot atomically delete across physical generations.  A retry is
     // safe only after proving that every registered and orphan generation has
@@ -1305,20 +1332,20 @@ async function removeDocumentInternal(projectPath: string, docId: string): Promi
     ])
     for (const tableName of remainingTargets) {
       if (!remainingTableNames.includes(tableName)) continue
-      const rows = await (await db.openTable(tableName)).query()
+      const rows = await withOpenTable(db, tableName, table => table.query()
         .filter(`\`docId\` = '${escapedId}'`)
         .limit(1)
-        .toArray()
+        .toArray())
       if (rows.length > 0) return false
     }
     if (remainingTableNames.includes(DOCS_TABLE_NAME)) {
-      await (await db.openTable(DOCS_TABLE_NAME)).delete(`id = '${escapedId}'`)
+      await withOpenTable(db, DOCS_TABLE_NAME, table => table.delete(`id = '${escapedId}'`))
     }
     if (remainingTableNames.includes(DOCS_TABLE_NAME)) {
-      const rows = await (await db.openTable(DOCS_TABLE_NAME)).query()
+      const rows = await withOpenTable(db, DOCS_TABLE_NAME, table => table.query()
         .filter(`id = '${escapedId}'`)
         .limit(1)
-        .toArray()
+        .toArray())
       if (rows.length > 0) return false
     }
     fs.rmSync(knowledgeCopyPath(getProjectDataRoot(projectPath), docId), { force: true })
@@ -1598,9 +1625,11 @@ async function readPortableKnowledgeSnapshotInternal(projectStorageRoot: string)
     const hasChunks = tableNames.includes(TABLE_NAME)
     if (!hasDocuments && !hasChunks) return { version: PORTABLE_KNOWLEDGE_VERSION, documents: [] }
     if (!hasDocuments || !hasChunks) throw new Error('PORTABLE_KNOWLEDGE_INVALID')
-    const documentsTable = await db.openTable(DOCS_TABLE_NAME)
-    const chunksTable = await db.openTable(TABLE_NAME)
+    let documentsTable: lancedb.Table | undefined
+    let chunksTable: lancedb.Table | undefined
     try {
+      documentsTable = await db.openTable(DOCS_TABLE_NAME)
+      chunksTable = await db.openTable(TABLE_NAME)
       const documentRows = await documentsTable.query().toArray()
       const chunkRows = await chunksTable.query()
         .select(['docId', 'fileName', 'text', 'chunkIndex', 'totalChunks', 'corpusKind']).toArray()
@@ -1641,8 +1670,8 @@ async function readPortableKnowledgeSnapshotInternal(projectStorageRoot: string)
       assertPhysicalTree(dbPath)
       return snapshot
     } finally {
-      documentsTable.close()
-      chunksTable.close()
+      documentsTable?.close()
+      chunksTable?.close()
     }
   } finally { db.close() }
 }
@@ -1685,7 +1714,8 @@ export async function restorePortableKnowledgeSnapshot(
         importedAt: PORTABLE_KNOWLEDGE_DATE,
         corpusKind: document.corpusKind,
       })))
-      await db.createTable(DOCS_TABLE_NAME, documentRows)
+      const docs = await db.createTable(DOCS_TABLE_NAME, documentRows)
+      docs.close()
       const chunks = await db.createTable(TABLE_NAME, recordsForSchema(chunkRows, canonicalChunkSchema()), { schema: canonicalChunkSchema() })
       chunks.close()
     } finally { db.close() }
@@ -1711,17 +1741,18 @@ async function listDocumentsInternal(projectPath: string): Promise<DocumentInfo[
   try {
     const db = await getConnection(projectPath)
     if (!(await db.tableNames()).includes(DOCS_TABLE_NAME)) return []
-    const table = await db.openTable(DOCS_TABLE_NAME)
-    await ensureCorpusKindColumn(table)
-    const rows = await table.query().toArray()
-    return rows.map((row: { id: string; fileName: string; importedAt: string; chunkCount: number; filePath?: string; corpusKind?: KnowledgeCorpusKind }) => ({
-      id: row.id,
-      fileName: row.fileName,
-      importedAt: row.importedAt,
-      chunkCount: row.chunkCount,
-      filePath: row.filePath || '',
-      corpusKind: row.corpusKind ?? 'unknown',
-    }))
+    return await withOpenTable(db, DOCS_TABLE_NAME, async (table) => {
+      await ensureCorpusKindColumn(table)
+      const rows = await table.query().toArray()
+      return rows.map((row: { id: string; fileName: string; importedAt: string; chunkCount: number; filePath?: string; corpusKind?: KnowledgeCorpusKind }) => ({
+        id: row.id,
+        fileName: row.fileName,
+        importedAt: row.importedAt,
+        chunkCount: row.chunkCount,
+        filePath: row.filePath || '',
+        corpusKind: row.corpusKind ?? 'unknown',
+      }))
+    })
   } catch {
     return []
   }
@@ -1763,21 +1794,23 @@ async function getDocumentIntegrityInternal(
   const escapedId = docId.replace(/'/g, "''")
   let chunkRows: Array<{ id: string; chunkIndex: number; totalChunks: number; text: string; corpusKind?: KnowledgeCorpusKind }> = []
   if (tableNames.includes(TABLE_NAME)) {
-    const chunksTable = await db.openTable(TABLE_NAME)
-    await ensureCorpusKindColumn(chunksTable)
-    chunkRows = await chunksTable.query()
-      .filter(`\`docId\` = '${escapedId}'`)
-      .select(['id', 'chunkIndex', 'totalChunks', 'text', 'corpusKind'])
-      .toArray() as typeof chunkRows
+    chunkRows = await withOpenTable(db, TABLE_NAME, async (chunksTable) => {
+      await ensureCorpusKindColumn(chunksTable)
+      return chunksTable.query()
+        .filter(`\`docId\` = '${escapedId}'`)
+        .select(['id', 'chunkIndex', 'totalChunks', 'text', 'corpusKind'])
+        .toArray() as Promise<typeof chunkRows>
+    })
   }
   let documentRows: Array<{ id: string; chunkCount: number; corpusKind?: KnowledgeCorpusKind }> = []
   if (tableNames.includes(DOCS_TABLE_NAME)) {
-    const docsTable = await db.openTable(DOCS_TABLE_NAME)
-    await ensureCorpusKindColumn(docsTable)
-    documentRows = await docsTable.query()
-      .filter(`id = '${escapedId}'`)
-      .select(['id', 'chunkCount', 'corpusKind'])
-      .toArray() as typeof documentRows
+    documentRows = await withOpenTable(db, DOCS_TABLE_NAME, async (docsTable) => {
+      await ensureCorpusKindColumn(docsTable)
+      return docsTable.query()
+        .filter(`id = '${escapedId}'`)
+        .select(['id', 'chunkCount', 'corpusKind'])
+        .toArray() as Promise<typeof documentRows>
+    })
   }
   const ordered = [...chunkRows].sort((left, right) => left.chunkIndex - right.chunkIndex)
   const document = documentRows[0]
@@ -1813,11 +1846,12 @@ async function getDocumentIntegrityInternal(
       corpusKind?: KnowledgeCorpusKind
     }> = []
     if (tableNames.includes(tableName)) {
-      const table = await db.openTable(tableName)
-      await ensureCorpusKindColumn(table)
-      rows = await table.query()
-        .filter(`\`docId\` = '${escapedId}'`)
-        .toArray() as typeof rows
+      rows = await withOpenTable(db, tableName, async (table) => {
+        await ensureCorpusKindColumn(table)
+        return table.query()
+          .filter(`\`docId\` = '${escapedId}'`)
+          .toArray() as Promise<typeof rows>
+      })
     }
     const registered = registeredByTable.get(tableName)
     const required = rows.length > 0 || registered?.generation === registry.activeGeneration
@@ -1880,13 +1914,13 @@ async function getStatsInternal(projectPath: string): Promise<KBStats> {
       return { documentCount: 0, totalChunks: 0, vectorDimension: 0, hasVectors: false }
     }
     const docs = tableNames.includes(DOCS_TABLE_NAME)
-      ? await (await db.openTable(DOCS_TABLE_NAME)).countRows()
+      ? await withOpenTable(db, DOCS_TABLE_NAME, table => table.countRows())
       : 0
     const registry = await loadOrRegisterLegacyRegistry(projectPath, db, tableNames)
     const active = activeSpace(registry)
     return {
       documentCount: docs,
-      totalChunks: await (await db.openTable(TABLE_NAME)).countRows(),
+      totalChunks: await withOpenTable(db, TABLE_NAME, table => table.countRows()),
       vectorDimension: active?.vectorDimension ?? 0,
       hasVectors: active !== undefined,
     }
@@ -1907,7 +1941,7 @@ function backfillSpaceForIdentity(registry: EmbeddingSpaceRegistry, identity?: E
 
 async function vectorisedIdsForSpace(db: lancedb.Connection, space: EmbeddingSpace | undefined): Promise<Set<string>> {
   if (!space) return new Set()
-  const rows = await (await db.openTable(space.tableName)).query().select(['id', 'vector']).toArray()
+  const rows = await withOpenTable(db, space.tableName, table => table.query().select(['id', 'vector']).toArray())
   return new Set(
     rows
       .filter(row => vectorIsUsable((row as { vector?: unknown }).vector, space.vectorDimension))
@@ -1919,7 +1953,7 @@ async function missingCanonicalRows(
   db: lancedb.Connection,
   space: EmbeddingSpace | undefined,
 ): Promise<Array<{ id: string; text: string }>> {
-  const rows = await (await db.openTable(TABLE_NAME)).query().select(['id', 'text']).toArray()
+  const rows = await withOpenTable(db, TABLE_NAME, table => table.query().select(['id', 'text']).toArray())
   const vectorisedIds = await vectorisedIdsForSpace(db, space)
   return rows
     .map(row => ({ id: (row as { id: string }).id, text: (row as { text: string }).text }))
@@ -1991,7 +2025,7 @@ async function updateChunkVectorsInternal(
     db = await getConnection(projectPath)
     const tableNames = await db.tableNames()
     if (!tableNames.includes(TABLE_NAME)) return { success: false, count: 0, error: 'EMBEDDING_SPACE_BACKFILL_TARGET_MISSING' }
-    const canonicalRows = await (await db.openTable(TABLE_NAME)).query().toArray()
+    const canonicalRows = await withOpenTable(db, TABLE_NAME, table => table.query().toArray())
     const updateById = new Map(updates.map(update => [update.id, update.vector]))
     const records = canonicalRows
       .filter(row => updateById.has((row as { id: string }).id))

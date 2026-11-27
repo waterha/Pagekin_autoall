@@ -14,6 +14,7 @@ import { ReviewRepository } from '../repositories/review-repository'
 import { RevisionRepository } from '../repositories/revision-repository'
 import { ReviewCycleRepository } from '../repositories/review-cycle-repository'
 import { captureReviewRevisionContext, reviewRevisionRequest, REVIEW_REVISION_OPERATIONS } from './review-revision-context'
+import { getGenerationLedgerIndex } from './generation-ledger-index'
 
 type ArtifactRef = ReviewGenerationCommitRequest['artifact']
 interface Effect {
@@ -122,12 +123,16 @@ export class ReviewRevisionGeneration {
         recheckCount: cycle?.disposition === 'completed' ? 1 : 0, disposition: cycle?.disposition ?? 'required' } } : {}) } }
   }
   private parent(context: ReviewRevisionContext): { parentRootActionId?: string; modelId?: string } {
+    const ledger = getGenerationLedgerIndex(this.db)
+    if (ledger.invalidUsageReceiptCount() > 0) {
+      for (const row of this.attempts()) JSON.parse(row.usage_receipt_json)
+    }
     if (context.recheck) {
       const plan = ReviewCycleRepository.planRecheck(context.recheck.cycleId, this.db)
       const frozenPlan = plan.context && { ...plan.context, version: context.recheck.version }
       if (plan.disposition !== 'required' || !frozenPlan || !isDeepStrictEqual(frozenPlan, context.recheck))
         throw new Error('GENERATION_REVIEW_LINEAGE_UNPROVEN')
-      const matching = this.attempts().filter(row => {
+      const matching = ledger.reviewEffectAttempts('review', plan.reviewId).filter(row => {
         const effect = JSON.parse(row.usage_receipt_json)?.reviewRevisionEffect as Effect | undefined
         return effect?.kind === 'review' && effect.id === plan.reviewId
       })
@@ -139,7 +144,7 @@ export class ReviewRevisionGeneration {
         modelId: (parentRun.binding.sourceManifest.modelReceipt as { modelId: string }).modelId }
     }
     if (!context.confirmation) return {}
-    const matching = this.attempts().filter(row => {
+    const matching = ledger.reviewEffectAttempts('review', context.confirmation.snapshot.sourceReviewId).filter(row => {
       const effect = JSON.parse(row.usage_receipt_json)?.reviewRevisionEffect as Effect | undefined
       return effect?.kind === 'review' && effect.id === context.confirmation!.snapshot.sourceReviewId
     })

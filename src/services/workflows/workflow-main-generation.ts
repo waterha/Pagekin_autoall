@@ -61,12 +61,25 @@ export async function createWorkflowMainGenerationRuntime(request: WorkflowMainG
   const displayed = new Map<string, string>()
   const onSnapshot = (snapshot: MainGenerationSnapshot) => {
     if (closed) return
-    if (snapshot.diagnostics) callbacks.setGenerationActivity?.({ operation, diagnostics: snapshot.diagnostics })
-    if (callbacks.replaceText) callbacks.replaceText(snapshot.text)
-    else {
-      const previous = displayed.get(snapshot.artifactId) ?? ''
-      // These are verified durable full snapshots; this difference is display-only.
-      if (snapshot.text.startsWith(previous)) callbacks.appendText(snapshot.text.slice(previous.length))
+    const hadDisplayed = displayed.has(snapshot.artifactId)
+    const previous = displayed.get(snapshot.artifactId) ?? ''
+    const textChanged = !hadDisplayed || snapshot.text !== previous
+    if (callbacks.updateStreamSnapshot && (callbacks.replaceText || !hadDisplayed || snapshot.text.startsWith(previous))) {
+      const nextText = textChanged
+        ? (callbacks.replaceText ? snapshot.text : previous + snapshot.text.slice(previous.length))
+        : undefined
+      if (snapshot.diagnostics || nextText !== undefined) {
+        callbacks.updateStreamSnapshot({
+          ...(snapshot.diagnostics ? { activity: { operation, diagnostics: snapshot.diagnostics } } : {}),
+          ...(nextText !== undefined ? { text: nextText } : {}),
+        })
+      }
+    } else {
+      if (snapshot.diagnostics) callbacks.setGenerationActivity?.({ operation, diagnostics: snapshot.diagnostics })
+      if (textChanged) {
+        if (callbacks.replaceText) callbacks.replaceText(snapshot.text)
+        else if (snapshot.text.startsWith(previous)) callbacks.appendText(snapshot.text.slice(previous.length))
+      }
     }
     displayed.set(snapshot.artifactId, snapshot.text)
   }

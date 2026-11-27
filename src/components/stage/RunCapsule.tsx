@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Check } from 'lucide-react'
 import { sameProjectPathKey } from '../../shared/project-session-context'
 import { useLocaleStore } from '../../stores/locale-store'
@@ -13,6 +13,46 @@ import { durationText } from './run/run-format'
 
 const DONE_VISIBLE_MS = 1800
 
+type CapsuleStepSummary = {
+  name: string
+  status: WorkflowRun['steps'][number]['status']
+  progress?: number
+  lastProgressAt?: string
+  activityOn: boolean
+}
+
+type CapsuleRunSummary = {
+  id: string
+  title: string
+  status: WorkflowRun['status']
+  currentStepIndex: number
+  percent: number
+  ratio: number
+  currentStep?: CapsuleStepSummary
+}
+
+function summarizeRun(run: WorkflowRun): CapsuleRunSummary {
+  const step = run.steps[run.currentStepIndex]
+  const ratio = runProgress(run)
+  return {
+    id: run.id,
+    title: run.title,
+    status: run.status,
+    currentStepIndex: run.currentStepIndex,
+    percent: Math.round(ratio * 100),
+    ratio,
+    ...(step ? {
+      currentStep: {
+        name: step.name,
+        status: step.status,
+        progress: step.progress,
+        lastProgressAt: step.lastProgressAt,
+        activityOn: Boolean(step.generationActivity && !step.generationActivity.diagnostics?.endReason),
+      },
+    } : {}),
+  }
+}
+
 /**
  * 顶栏运行胶囊：这部作品有运行时显示进度；没有运行时，若这部作品最近一次结束的运行是完成、且结束不到 1.8 秒，显示「运行已完成」。
  * 完成态由这次运行的结束时间推出，接着又有运行、运行失败或换了作品时自然不再显示。
@@ -20,11 +60,17 @@ const DONE_VISIBLE_MS = 1800
 export default function RunCapsule() {
   const text = useLocaleStore(s => s.text)
   const projectPath = useProjectStore(s => s.currentProject?.path)
-  const allRuns = useWorkflowStore(s => s.activeRuns)
-  const lastEnded = useWorkflowStore(s => projectPath ? s.history.find(run => sameProjectPathKey(run.projectPath, projectPath)) : undefined)
+  // Subscribe only to serialized capsule-visible metadata so streaming step.result/elapsedMs ticks do not re-render the top bar.
+  const runsSignature = useWorkflowStore(s => projectPath
+    ? JSON.stringify(s.activeRuns.filter(run => sameProjectPathKey(run.projectPath, projectPath)).map(summarizeRun))
+    : '[]')
+  const runs = useMemo(() => JSON.parse(runsSignature) as CapsuleRunSummary[], [runsSignature])
+  const lastEnded = useWorkflowStore(s => {
+    const found = projectPath ? s.history.find(run => sameProjectPathKey(run.projectPath, projectPath)) : undefined
+    return found?.status === 'completed' && found.completedAt ? found.completedAt : undefined
+  })
   const sheetOpen = useStageStore(s => s.sheet?.kind === 'run')
-  const runs = projectPath ? allRuns.filter(run => sameProjectPathKey(run.projectPath, projectPath)) : []
-  const doneUntil = lastEnded?.status === 'completed' && lastEnded.completedAt ? Date.parse(lastEnded.completedAt) + DONE_VISIBLE_MS : 0
+  const doneUntil = lastEnded ? Date.parse(lastEnded) + DONE_VISIBLE_MS : 0
 
   const toggle = (runId?: string) => {
     if (sheetOpen) useStageStore.setState({ sheet: null })
@@ -39,7 +85,7 @@ export default function RunCapsule() {
   if (runs.length > 1) {
     return (
       <button type="button" className="stage-capsule" aria-expanded={sheetOpen} onClick={() => toggle()}>
-        <ProgressRing size={18} stroke={2} ratio={runs.reduce((sum, run) => sum + runProgress(run), 0) / runs.length} />
+        <ProgressRing size={18} stroke={2} ratio={runs.reduce((sum, run) => sum + run.ratio, 0) / runs.length} />
         {waiting > 0
           ? text(`${runs.length} 项运行中 · ${waiting} 项等你确认`, `${runs.length} running · ${waiting} need you`)
           : <>{text(`${runs.length} 项运行中`, `${runs.length} running`)}<CapsuleWait runs={runs} /></>}
@@ -48,8 +94,8 @@ export default function RunCapsule() {
   }
 
   const [run] = runs
-  const step = run.steps[run.currentStepIndex]
-  const percent = Math.round(runProgress(run) * 100)
+  const step = run.currentStep
+  const percent = run.percent
   return (
     <button type="button" className="stage-capsule" data-tone={waiting ? 'warn' : undefined} aria-expanded={sheetOpen} onClick={() => toggle(run.id)}>
       <ProgressRing size={18} stroke={2} ratio={percent / 100} />
@@ -60,10 +106,22 @@ export default function RunCapsule() {
   )
 }
 
-function CapsuleWait({ runs }: { runs: readonly WorkflowRun[] }) {
+function CapsuleWait({ runs }: { runs: readonly CapsuleRunSummary[] }) {
   const text = useLocaleStore(s => s.text)
   const now = useNow()
-  const longest = Math.max(0, ...runs.map(run => stepWait(run.steps[run.currentStepIndex], run.status, now)?.waitedMs ?? 0))
+  const longest = Math.max(0, ...runs.map(run => {
+    const step = run.currentStep
+    if (!step) return 0
+    return stepWait({
+      id: '',
+      name: step.name,
+      description: '',
+      status: step.status,
+      lastProgressAt: step.lastProgressAt,
+      logs: [],
+      ...(step.activityOn ? { generationActivity: { operation: '' } } : {}),
+    }, run.status, now)?.waitedMs ?? 0
+  }))
   if (longest === 0) return null
   const waited = durationText(longest, text)
   return <span className="stage-capsule-wait">{text(`已等 ${waited}`, `Waiting ${waited}`)}</span>

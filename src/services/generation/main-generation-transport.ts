@@ -14,19 +14,30 @@ function assertHandle(session: ProjectSessionContext, handle: MainGenerationRunH
   if (![handle.projectId, handle.epoch, handle.rootActionId, handle.runId].every(value => typeof value === 'string' && Boolean(value.trim()))
     || handle.projectId !== session.projectId || !historical && handle.epoch !== session.leaseId) throw new Error('GENERATION_PROJECT_SESSION_MISMATCH')
 }
+const MAX_CACHED_SESSIONS = 256
+
 /** Construction is inert: neither current session nor IPC is read until a call. */
 export function createMainGenerationTransport(captureSession = getActiveProjectSessionContext) {
   const sessions = new Map<string, ProjectSessionContext>()
+  function rememberSession(key: string, session: ProjectSessionContext): void {
+    sessions.delete(key)
+    sessions.set(key, session)
+    while (sessions.size > MAX_CACHED_SESSIONS) {
+      const oldest = sessions.keys().next().value
+      if (oldest === undefined) break
+      sessions.delete(oldest)
+    }
+  }
   function sessionFor(handle: MainGenerationRunHandle, historical = false) {
     const key = handleKey(handle)
     const session = sessions.get(key) ?? freezeSession(captureSession())
     assertHandle(session, handle, historical)
-    sessions.set(key, session)
+    rememberSession(key, session)
     return session
   }
   function bindView(view: MainGenerationRunView, session: ProjectSessionContext, historical = false): MainGenerationRunView {
     assertHandle(session, view.handle, historical)
-    sessions.set(handleKey(view.handle), session)
+    rememberSession(handleKey(view.handle), session)
     return view
   }
   const transport: MainGenerationTransport = {

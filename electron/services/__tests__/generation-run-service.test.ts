@@ -175,6 +175,30 @@ describe('single durable generation owner', () => {
         expect(result.artifact?.text).toBe('可见正文');
         expect(JSON.stringify(f.db.prepare('SELECT artifact_json FROM generation_artifacts').all())).not.toContain('临时推理');
     });
+    it('batches frequent reasoning chunks within 100ms and flushes in order before settlement', async () => {
+        vi.useFakeTimers();
+        try {
+            const f = fixture(), shown: string[] = [];
+            let finish!: (v: { usage: typeof usage; finishReason: string }) => void;
+            const service = createGenerationRunService({ repository: f.repository,
+                onReasoning: ({ text }) => shown.push(text),
+                dispatch: async (_request, options) => {
+                    options.onReasoning?.('第一段');
+                    options.onReasoning?.('第二段');
+                    options.onReasoning?.('第三段');
+                    return new Promise(resolve => { finish = resolve; });
+                },
+            }), run = service.open(f.open);
+            const operation = service.execute(f.request(run.runId));
+            expect(shown).toEqual([]);
+            await vi.advanceTimersByTimeAsync(100);
+            expect(shown).toEqual(['第一段第二段第三段']);
+            finish({ usage, finishReason: 'stop' });
+            await operation;
+        } finally {
+            vi.useRealTimers();
+        }
+    });
     it('disk failure retains a copyable tail and prohibits subsequent dispatch', async () => { const f = fixture(); vi.spyOn(f.repository, 'snapshot').mockImplementation(() => { throw new Error('disk full'); }); const dispatch = vi.fn(async (_r, o) => { o.onVisible({ kind: 'delta', text: 'unsaved' }); return { usage, finishReason: 'stop' }; }); const service = createGenerationRunService({ repository: f.repository, dispatch }), run = service.open(f.open), result = await service.execute(f.request(run.runId)); expect(result.unsavedTail).toBe('unsaved'); expect(result.failureCode).toBe('GENERATION_STORAGE_FAILED'); expect(f.repository.receipt(result.attempt.attemptId).failureCode).toBe('GENERATION_STORAGE_FAILED'); await expect(service.execute(f.request(run.runId, 'again'))).rejects.toThrow('GENERATION_STORAGE_FAILED'); expect(dispatch).toHaveBeenCalledTimes(1); });
     it('defaults recovery authorization to rejection and pauses elapsed time', async () => { const f = fixture(), service = createGenerationRunService({ repository: f.repository, dispatch: vi.fn() }), run = service.open(f.open); const a = f.repository.reserve(run.runId, 'a', textHash('a'), 200, 100); f.repository.markDispatched(a.attempt.attemptId); f.setNow(2000); service.pause(run.rootActionId); f.setNow(9000); expect(f.repository.budget(run.rootActionId).activeElapsedMs).toBe(1000); await expect(service.resume(run.runId, { ...run.binding, epoch: 'next' })).rejects.toThrow('GENERATION_RECOVERY_UNAUTHORIZED'); });
     it.each([null, { ...usage, promptTokens: -1 }, { ...usage, totalTokens: 101 }, { ...usage, trusted: false }])('keeps reservation for absent or untrusted usage', value => { const f = fixture(); expect(settleProviderUsage(value, f.policy).trusted).toBe(false); });

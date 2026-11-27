@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { Locale } from '../../i18n/types'
 import { coarseRuntimePlatform, formatSafeCallDiagnostic, type SafeDiagnosticWorkflow } from '../../services/safe-call-diagnostic'
 import { diagnosticWorkflowForCall, type LLMCallRecord, type LLMStats } from '../../services/stats-service'
@@ -27,9 +27,6 @@ export function useModelCalls(): ModelCalls {
   const project = useProjectStore(s => s.currentProject)
   const session = useMemo(() => projectSessionContextFromProject(project), [project])
   const [gate] = useState(() => new LLMDataRequestGate())
-  const activeRuns = useWorkflowStore(s => s.activeRuns)
-  const history = useWorkflowStore(s => s.history)
-  const runs = useMemo(() => [...activeRuns, ...history], [activeRuns, history])
   const [data, setData] = useState<{ session: ProjectSessionContext; stats: LLMStats; history: LLMCallRecord[] } | null>(null)
 
   useEffect(() => {
@@ -59,11 +56,17 @@ export function useModelCalls(): ModelCalls {
     }
   }, [session, gate])
 
+  const workflowFor = useCallback((call: LLMCallRecord) => {
+    if (!session) return undefined
+    const { activeRuns, history } = useWorkflowStore.getState()
+    return diagnosticWorkflowForCall(call, [...activeRuns, ...history], session.projectPath)
+  }, [session])
+
   const visible = data && sameProjectSessionContext(data.session, session) ? data : null
   return {
     stats: visible?.stats ?? null,
     history: visible?.history ?? [],
-    workflowFor: call => session ? diagnosticWorkflowForCall(call, runs, session.projectPath) : undefined,
+    workflowFor,
   }
 }
 

@@ -126,9 +126,20 @@ export async function createMainOwnedGenerationRuntime(options: MainOwnedGenerat
   let projectionError: unknown
   let queue = Promise.resolve()
   const snapshots = new Map<string, MainGenerationSnapshot>()
+  let lastVerifiedText: string | undefined
+  let lastVerifiedHash: string | undefined
   const assertView = (view: MainGenerationRunView) => {
     if (!sameHandle(handle, view.handle)) throw new Error('MAIN_RUN_IDENTITY_MISMATCH')
     return view
+  }
+  const verifyTextHash = async (text: string, expectedHash: string): Promise<boolean> => {
+    if (!isContentHash(expectedHash)) return false
+    if (text === lastVerifiedText) return expectedHash === lastVerifiedHash
+    const computed = await hashAuthorText(text)
+    if (computed !== expectedHash) return false
+    lastVerifiedText = text
+    lastVerifiedHash = computed
+    return true
   }
   const accept = (snapshot: MainGenerationSnapshot) => {
     const captured = { ...snapshot }
@@ -138,7 +149,7 @@ export async function createMainOwnedGenerationRuntime(options: MainOwnedGenerat
         || !Number.isSafeInteger(captured.revision) || captured.revision < 0
         || !Number.isSafeInteger(captured.durableRevision) || captured.durableRevision < 0 || captured.durableRevision > captured.revision
         || !['running', 'completed', 'failed', 'cancelled', 'unknown'].includes(captured.status)
-        || typeof captured.text !== 'string' || !isContentHash(captured.textHash) || await hashAuthorText(captured.text) !== captured.textHash) throw new Error('INVALID_MAIN_SNAPSHOT')
+        || typeof captured.text !== 'string' || !(await verifyTextHash(captured.text, captured.textHash))) throw new Error('INVALID_MAIN_SNAPSHOT')
       if (closed) return
       const previous = snapshots.get(captured.artifactId)
       if (previous) {

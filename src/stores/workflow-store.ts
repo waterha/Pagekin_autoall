@@ -196,6 +196,8 @@ export interface StepCallbacks {
   appendText: (text: string) => void
   /** 用一份安全的临时或终态文本替换当前步骤输出。 */
   replaceText?: (text: string) => void
+  /** 在一次 store 更新中原子写入流式诊断与安全文本预览。 */
+  updateStreamSnapshot?: (update: { activity?: NonNullable<WorkflowStep['generationActivity']>; text?: string }) => void
 }
 
 // ===== 工作流定义 =====
@@ -814,6 +816,20 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
           if (isRunningMutation || isCancellationCleanup) {
             updateStepById(set, run.id, i, { result: text })
           }
+        },
+        updateStreamSnapshot: ({ activity, text }) => {
+          const patch: Partial<WorkflowStep> = {}
+          if (activity !== undefined) patch.generationActivity = activity
+          if (text !== undefined) {
+            const activeRun = get().activeRuns.find(r => r.id === run.id)
+            const step = activeRun?.steps[i]
+            if (activeRun && activeRun.currentStepIndex === i && step?.status === 'running') {
+              const isRunningMutation = activeRun.status === 'running'
+              const isCancellationCleanup = activeRun.status === 'cancelling' && text === ''
+              if (isRunningMutation || isCancellationCleanup) patch.result = text
+            }
+          }
+          if (Object.keys(patch).length > 0) updateStepById(set, run.id, i, patch)
         },
       }
 

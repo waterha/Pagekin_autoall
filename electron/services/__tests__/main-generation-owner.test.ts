@@ -4396,6 +4396,14 @@ describe('超长报错里学到真实窗口', () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
+  it('取消运行立即释放租约，异步蓝图恢复查找与同步结果一致', async () => {
+    const f = fixture()
+    const run = f.owner.begin(f.begin)
+    f.owner.cancel(run.handle)
+    await expect(f.owner.execute({ handle: run.handle, invocationNonce: 'after-cancel', task })).rejects.toThrow(/CANCELLED|DISPATCH_BLOCKED|RESUME_REQUIRED/)
+    await expect(f.owner.findBlueprintRecoveryAsync()).resolves.toEqual(f.owner.findBlueprintRecovery())
+  })
+
   function dispatchOutlineThenReject(): GenerationRunServiceDependencies['dispatch'] {
     let calls = 0
     return async (_request, options) => {

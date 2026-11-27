@@ -111,10 +111,15 @@ export function useChapterBlueprints({
     const session = currentProjectSessionForPath(projectKey)
     if (!session) return
     let current = true
-    void ipc.invokeWithProjectSession(session, 'generation:find-blueprint-recovery').then(recovery => {
-      if (current && isCurrentProjectSession(session)) setPlanningRecovery(recovery)
-    }).catch(() => {})
-    return () => { current = false }
+    const timer = window.setTimeout(() => {
+      void ipc.invokeWithProjectSession(session, 'generation:find-blueprint-recovery').then(recovery => {
+        if (current && isCurrentProjectSession(session)) setPlanningRecovery(recovery)
+      }).catch(() => {})
+    }, 250)
+    return () => {
+      current = false
+      window.clearTimeout(timer)
+    }
   }, [projectKey, currentProject?.sessionLease, latestDirectoryRun, recoveryRevision])
   /** 打开蓝图恢复稿，以点击时主进程的最新判定为准。 */
   const openPlanningRecovery = useCallback(() => {

@@ -76,6 +76,37 @@ describe('知识库向量维度', () => {
     expect(db.isOpen()).toBe(false)
   })
 
+  it('每次 openTable 和 createTable 在操作完成后都会关闭原生 Table 句柄', async () => {
+    const projectPath = fs.mkdtempSync(path.join(path.resolve('.runtime/.cache'), 'ai-novel-vector-table-close-'))
+    projects.push(projectPath)
+    prepareCanonicalStorageFixture(projectPath)
+    const db = await getConnection(projectPath)
+    const closeSpies: Array<{ name: string; spy: ReturnType<typeof vi.spyOn> }> = []
+    const originalOpen = db.openTable.bind(db)
+    const originalCreate = db.createTable.bind(db)
+    vi.spyOn(db, 'openTable').mockImplementation(async (...args) => {
+      const table = await originalOpen(...args)
+      closeSpies.push({ name: `open:${String(args[0])}`, spy: vi.spyOn(table, 'close') })
+      return table
+    })
+    vi.spyOn(db, 'createTable').mockImplementation(async (...args) => {
+      const table = await originalCreate(...args)
+      closeSpies.push({ name: `create:${String(args[0])}`, spy: vi.spyOn(table, 'close') })
+      return table
+    })
+
+    const added = await addChunks(projectPath, 'doc-close', 'ch1.txt', ['第一段正文'], [Array.from({ length: 64 }, () => 0.1)])
+    expect(added.success).toBe(true)
+    await listDocuments(projectPath)
+    await getStats(projectPath)
+    await getDocumentIntegrity(projectPath, 'doc-close')
+    await search(projectPath, '第一段', Array.from({ length: 64 }, () => 0.1), 3)
+    expect(await removeDocument(projectPath, 'doc-close')).toBe(true)
+
+    expect(closeSpies.length).toBeGreaterThan(0)
+    expect(closeSpies.filter(entry => entry.spy.mock.calls.length === 0)).toEqual([])
+  })
+
   it('接受嵌入模型返回的非 2048 维有限向量', async () => {
     const projectPath = fs.mkdtempSync(path.join(path.resolve('.runtime/.cache'), 'ai-novel-vector-dimension-'))
     projects.push(projectPath)

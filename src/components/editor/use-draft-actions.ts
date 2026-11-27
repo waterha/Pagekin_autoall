@@ -210,15 +210,14 @@ export function useDraftActions({ tabId, filePath, content, projectKey }: DraftT
   const status: DraftStatus = tabDraftStatus ?? meta?.status ?? 'draft'
   const isReadonly = DRAFT_STATUS_INFO[status].readOnly || !resourceWriteAllowed(filePath)
 
-  const activeRuns = useWorkflowStore(s => s.activeRuns)
   // 按运行占用的章节资源判断归属；标题随界面语言变化，英文界面里没有「第N章」。
-  const activeChapterRun = activeRuns.find(r =>
+  const chapterNumber = meta?.chapterNumber
+  const chapterKey = chapterNumber === undefined ? null : workflowResourceKey('chapter', chapterNumber)
+  const isChapterBusy = useWorkflowStore(s => chapterKey !== null && s.activeRuns.some(r =>
     r.projectPath === projectKey
     && r.type === 'chapter_creation'
-    && meta
-    && r.resourceKeys?.includes(workflowResourceKey('chapter', meta.chapterNumber))
-  )
-  const isChapterBusy = !!activeChapterRun
+    && r.resourceKeys?.includes(chapterKey)
+  ))
   const isDirty = editorTab?.dirty ?? false
   const restoredKey = meta && currentProject?.sessionLease ? restoredPublicationKey(currentProject.sessionLease, meta.id) : null
   const restored = useRestoredPublicationStore(state => (restoredKey ? state[restoredKey] : undefined))

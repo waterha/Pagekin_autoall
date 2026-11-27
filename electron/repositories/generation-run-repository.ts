@@ -9,6 +9,7 @@ import { DRAFT_RECONCILE_PURPOSE } from '../../src/shared/draft-reconciliation';
 import { DRAFT_SHORT_OUTLINE_PURPOSE } from '../../src/shared/draft-short-outline';
 import { countDraftUnits, draftTargetUnitRange } from '../../src/shared/draft-units';
 import { getProjectDb } from '../database';
+import { getGenerationLedgerIndex } from '../services/generation-ledger-index';
 import type { PortableRuntimeFreezeTable } from '../services/portable-runtime-freeze';
 import { assertReservation, assertAttemptTransition, rootActionIdempotencyKey, type RootAction, type RootBudget, type PhysicalAttempt, type VisibleArtifact, type ProviderUsagePolicy } from '../../src/shared/generation-contract';
 import { isContentHash, sameProjectEpoch, type FrozenInputFingerprint, type SourceRef, type ProjectEpoch } from '../../src/shared/source-ref';
@@ -136,15 +137,20 @@ export class GenerationRunRepository {
         const { records } = splitStoredBinding(this.db().prepare('SELECT binding_json FROM generation_runs WHERE run_id=?').pluck().get(runId) as string);
         this.db().prepare('UPDATE generation_runs SET binding_json=? WHERE run_id=?').run(encode({ ...frozen, ...records }), runId);
     }
+    private ledger() {
+        return getGenerationLedgerIndex(this.db());
+    }
     private authorEditedRoot(rootId: string): boolean {
-        return !!this.db().prepare('SELECT 1 FROM generation_runs WHERE root_action_id=? AND json_type(binding_json,?) IS NOT NULL LIMIT 1').get(rootId, authorEffectPath);
+        return this.ledger().hasAuthorEffectForRoot(rootId);
     }
     assertPlotOutlineWritable(runId: string): void {
         if (this.isPrivatePlanningHistory(runId)) fail('GENERATION_PLANNING_HISTORY_READ_ONLY');
-        if (this.authorEditedRoot(this.get(runId).rootActionId)) fail('GENERATION_PLOT_OUTLINE_AUTHOR_SAVED');
+        const rootActionId = this.ledger().runRootActionId(runId);
+        if (!rootActionId) fail('GENERATION_RUN_MISSING');
+        if (this.authorEditedRoot(rootActionId)) fail('GENERATION_PLOT_OUTLINE_AUTHOR_SAVED');
     }
     isPrivatePlanningHistory(runId: string): boolean {
-        return !!this.db().prepare("SELECT 1 FROM generation_runs WHERE root_action_id=(SELECT root_action_id FROM generation_runs WHERE run_id=?) AND json_extract(binding_json,'$.sourceManifest.policy.planning.outlineProtocol')='chapter-parts-v2' LIMIT 1").get(runId);
+        return this.ledger().isPrivatePlanningHistory(runId);
     }
     plotOutlineAuthorEditReceipt(runId: string, operationId: string, committedRange: PlotOutlineRange, synopsisHash: string): PlotOutlineAuthorEditReceipt {
         const run = this.get(runId), policy = plotOutlinePolicy(run.binding.sourceManifest);
@@ -252,13 +258,11 @@ export class GenerationRunRepository {
         } | undefined;
         if (!row)
             fail('GENERATION_ROOT_MISSING');
-        const attempts = this.db().prepare('SELECT attempt_json FROM generation_attempts WHERE root_action_id=? ORDER BY rowid').all(rootId) as {
-            attempt_json: string;
-        }[];
+        const attempts = this.ledger().attemptJsonsForRoot(rootId);
         return { root: JSON.parse(row.action_json), policy: JSON.parse(row.budget_json), activeElapsedMs: row.active_elapsed_ms + (row.active_since_ms === null ? 0 : Math.max(0, this.now() - row.active_since_ms)), attempts: attempts.map(row => JSON.parse(row.attempt_json)), blockedCode: row.blocked_code };
     }
     attemptCount(runId: string): number {
-        return this.db().prepare('SELECT COUNT(*) FROM generation_attempts WHERE run_id=?').pluck().get(runId) as number;
+        return this.ledger().attemptCountForRun(runId);
     }
     hasNonCancelledAttempt(runId: string): boolean {
         const rows = this.db().prepare('SELECT attempt_json FROM generation_attempts WHERE run_id=?').all(runId) as { attempt_json: string }[];
@@ -739,17 +743,56 @@ export class GenerationRunRepository {
     }
     snapshot(attemptId: string, expectedRevision: number, text: string): VisibleArtifact {
         return this.transaction(() => {
-            const current = this.receipt(attemptId), prior = current.artifact!;
-            this.assertPlotOutlineWritable(current.run.runId);
-            if (!sameProjectEpoch(prior, current.budget.root))
+            const row = this.db().prepare(`SELECT t.attempt_id,t.run_id,t.root_action_id,t.attempt_json,
+                json_extract(t.usage_receipt_json,'$.artifactIdentity') AS identity_json,
+                a.artifact_id,a.artifact_json,a.revision,
+                g.action_json,
+                json_extract(r.binding_json,'$.projectId') AS run_project_id,
+                json_extract(r.binding_json,'$.fingerprint') AS run_fingerprint_json
+                FROM generation_attempts t
+                LEFT JOIN generation_artifacts a ON a.attempt_id=t.attempt_id
+                LEFT JOIN generation_runs r ON r.run_id=t.run_id
+                LEFT JOIN generation_roots g ON g.root_action_id=t.root_action_id
+                WHERE t.attempt_id=?`).get(attemptId) as {
+                attempt_id: string;
+                run_id: string;
+                root_action_id: string;
+                attempt_json: string;
+                identity_json: string | null;
+                artifact_id: string | null;
+                artifact_json: string | null;
+                revision: number | null;
+                action_json: string | null;
+                run_project_id: string | null;
+                run_fingerprint_json: string | null;
+            } | undefined;
+            if (!row)
+                fail('GENERATION_ATTEMPT_MISSING');
+            if (!row.run_project_id || !row.run_fingerprint_json)
+                fail('GENERATION_RUN_MISSING');
+            if (!row.action_json)
+                fail('GENERATION_ROOT_MISSING');
+            const prior: VisibleArtifact | null = row.artifact_json === null ? null : JSON.parse(row.artifact_json);
+            const identity = row.identity_json ? JSON.parse(row.identity_json) as ReceiptUsage['artifactIdentity'] : undefined;
+            const runFingerprint = JSON.parse(row.run_fingerprint_json) as RunBinding['fingerprint'];
+            if (prior && (prior.attemptId !== row.attempt_id || prior.rootActionId !== row.root_action_id
+                || !identity || prior.artifactId !== row.artifact_id || prior.artifactId !== identity.artifactId
+                || prior.epoch !== identity.epoch || !isDeepStrictEqual(prior.fingerprint, identity.fingerprint)
+                || !isDeepStrictEqual(prior.fingerprint, runFingerprint)
+                || prior.projectId !== row.run_project_id || prior.revision !== row.revision
+                || textHash(prior.text) !== prior.textHash)) fail('ARTIFACT_INTEGRITY_FAILED');
+            const attempt = JSON.parse(row.attempt_json) as PhysicalAttempt;
+            const root = JSON.parse(row.action_json) as RootAction;
+            this.assertPlotOutlineWritable(row.run_id);
+            if (!sameProjectEpoch(prior!, root))
                 fail('GENERATION_EPOCH_STALE');
-            if (prior.revision === expectedRevision + 1 && prior.text === text)
-                return prior;
-            if (['settled', 'unknown', 'cancelled-before-dispatch'].includes(current.attempt.status))
+            if (prior!.revision === expectedRevision + 1 && prior!.text === text)
+                return prior!;
+            if (['settled', 'unknown', 'cancelled-before-dispatch'].includes(attempt.status))
                 fail('ARTIFACT_ATTEMPT_TERMINAL');
-            if (prior.revision !== expectedRevision || !text.startsWith(prior.text) || /<\/?think\b/iu.test(text))
+            if (prior!.revision !== expectedRevision || !text.startsWith(prior!.text) || /<\/?think\b/iu.test(text))
                 fail('ARTIFACT_SNAPSHOT_CONFLICT');
-            const next = { ...prior, text, textHash: textHash(text), revision: expectedRevision + 1 };
+            const next = { ...prior!, text, textHash: textHash(text), revision: expectedRevision + 1 };
             const result = this.db().prepare('UPDATE generation_artifacts SET artifact_json=?,revision=? WHERE attempt_id=? AND revision=?').run(encode(next), next.revision, attemptId, expectedRevision);
             if (result.changes !== 1)
                 fail('ARTIFACT_SNAPSHOT_CONFLICT');
@@ -797,14 +840,7 @@ export class GenerationRunRepository {
             // 再逐个根 pause()。长跑后根与尝试都很多，而它跑在关闭作品、停止的同步路径上，
             // 于是「一停就卡」。改成：定向查询定位需要改状态的尝试，根的状态一次批量改完。
             // 冻结的可移植历史与作者已改过的根整根跳过，保持逐字节不变。
-            const affected = this.db().prepare(`SELECT attempt_id,attempt_json,root_action_id,
-                json_extract(attempt_json,'$.status') AS status FROM generation_attempts
-                WHERE json_extract(attempt_json,'$.status') IN ('dispatch-marked','reserved') ORDER BY rowid`).all() as {
-                attempt_id: string;
-                attempt_json: string;
-                root_action_id: string;
-                status: string;
-            }[];
+            const affected = this.ledger().activeAttempts();
             const frozen = new Set<string>();
             const isFrozenRoot = (rootId: string): boolean => {
                 const cached = frozen.has(rootId);
@@ -854,10 +890,10 @@ export class GenerationRunRepository {
     }
     private portableFrozenRoot(rootId: string): boolean {
         if (this.isFrozen('generation_roots', rootId)) return true;
-        const runIds = this.db().prepare('SELECT run_id FROM generation_runs WHERE root_action_id=?').all(rootId) as { run_id: string }[];
-        if (runIds.some(row => this.isFrozen('generation_runs', row.run_id))) return true;
-        const attemptIds = this.db().prepare('SELECT attempt_id FROM generation_attempts WHERE root_action_id=?').all(rootId) as { attempt_id: string }[];
-        return attemptIds.some(row => this.isFrozen('generation_attempts', row.attempt_id));
+        const runIds = this.ledger().runIdsForRoot(rootId);
+        if (runIds.some(runId => this.isFrozen('generation_runs', runId))) return true;
+        const attemptIds = this.db().prepare('SELECT attempt_id FROM temp.pagekin_attempt_index WHERE root_action_id=?').pluck().all(rootId) as string[];
+        return attemptIds.some(attemptId => this.isFrozen('generation_attempts', attemptId));
     }
     listCandidates(runId?: string): VisibleArtifact[] {
         const rows = this.db().prepare("SELECT attempt_id FROM generation_artifacts WHERE status!='discarded' AND (? IS NULL OR run_id=?) ORDER BY rowid").all(runId ?? null, runId ?? null) as { attempt_id: string }[];

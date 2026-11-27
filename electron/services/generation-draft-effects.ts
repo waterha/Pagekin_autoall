@@ -8,6 +8,7 @@ import { isDraftVisibleTextVersion } from '../../src/shared/draft-visible-text'
 import { isReceiptedDraftStatus } from '../../src/shared/draft-status'
 import { GenerationRunRepository, textHash, type DurableGenerationRun } from '../repositories/generation-run-repository'
 import { DraftRepository } from '../repositories/draft-repository'
+import { getGenerationLedgerIndex } from './generation-ledger-index'
 
 interface StoredDraftCommit extends GenerationDraftCommitReceipt {
   chapterNumber: number
@@ -45,6 +46,10 @@ export class GenerationDraftEffects {
   }
   /** 按批次号分组的草稿提交收据，按提交顺序；只取这一批时传 batchId。批次号由库里的 JSON 取出，不在这里逐行解析整份收据。 */
   batchCommits(batchId?: string): ReadonlyMap<string, AttemptRow[]> {
+    const ledger = getGenerationLedgerIndex(this.db)
+    if (ledger.invalidUsageReceiptCount() === 0) {
+      return groupByBatch(ledger.batchCommitRows(batchId))
+    }
     const batchOf = "json_extract(usage_receipt_json,'$.draftCommit.batchId')"
     const rows = this.db.prepare(`SELECT attempt_id,run_id,usage_receipt_json,${batchOf} AS batch_id
       FROM generation_attempts WHERE ${batchOf} ${batchId === undefined ? 'IS NOT NULL' : '= ?'} ORDER BY rowid`)
@@ -56,21 +61,15 @@ export class GenerationDraftEffects {
    * 只用于显示；续跑与提交走 readBatch 的严格查询，遇到坏行仍会报错。
    */
   listedBatchCommits(): { commits: ReadonlyMap<string, AttemptRow[]>; unreadable: number } {
-    const unreadable = this.db.prepare('SELECT COUNT(*) FROM generation_attempts WHERE NOT json_valid(usage_receipt_json)').pluck().get() as number
-    const batchOf = "CASE WHEN json_valid(usage_receipt_json) THEN json_extract(usage_receipt_json,'$.draftCommit.batchId') END"
-    const rows = this.db.prepare(`SELECT attempt_id,run_id,usage_receipt_json,${batchOf} AS batch_id
-      FROM generation_attempts WHERE ${batchOf} IS NOT NULL ORDER BY rowid`).all() as (AttemptRow & { batch_id: string })[]
-    return { commits: groupByBatch(rows), unreadable }
+    const ledger = getGenerationLedgerIndex(this.db)
+    const unreadable = ledger.invalidUsageReceiptCount()
+    return { commits: groupByBatch(ledger.batchCommitRows()), unreadable }
   }
   /** settledChapter 这一章按已确认完（已发布、后处理关键步骤都完成）算进度，用于放回删除前已确认完的章：放回会把它重置为待发布、待重导。 */
   unfinishedBatchChapters(projectId: string, settledChapter?: number): ReadonlySet<number> {
     const { commits } = this.listedBatchCommits()
     // 已取消、已封存或被阻断的批次再也续不上（续写只接受 active、paused 且未阻断的根），它写过的章不必为续写锁住。
-    const roots = this.db.prepare(`SELECT r.run_id FROM generation_runs r JOIN generation_roots g ON g.root_action_id=r.root_action_id
-      WHERE json_valid(r.binding_json) AND json_extract(r.binding_json,'$.sourceManifest.batchIntent') IS NOT NULL
-      AND COALESCE(CASE WHEN json_valid(g.action_json) THEN json_extract(g.action_json,'$.status') END,'') NOT IN ('cancelled','sealed')
-      AND g.blocked_code IS NULL`)
-      .pluck().all() as string[]
+    const roots = getGenerationLedgerIndex(this.db).activeBatchIntentRunIds()
     const chapters = new Set<number>()
     for (const batchId of roots) {
       try {

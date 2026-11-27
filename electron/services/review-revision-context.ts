@@ -16,6 +16,7 @@ import { ConsistencyExemptionRepository } from '../repositories/consistency-exem
 import { ReviewRepository } from '../repositories/review-repository'
 import { ReviewCycleRepository } from '../repositories/review-cycle-repository'
 import { textHash } from '../repositories/generation-run-repository'
+import { getGenerationLedgerIndex } from './generation-ledger-index'
 
 export const REVIEW_REVISION_OPERATIONS = ['review-chapter', 'refine-draft', 'refine-from-review'] as const
 const fail = (): never => { throw new Error('GENERATION_REVIEW_CONTEXT_INVALID') }
@@ -25,9 +26,7 @@ const fail = (): never => { throw new Error('GENERATION_REVIEW_CONTEXT_INVALID')
  * 版本恢复等另起新草稿的路径找不到记录，与旧草稿一样不加线索目标。
  */
 function draftThreadTasks(db: Database.Database, draftId: number, chapterNumber: number): readonly ChapterThreadTask[] {
-  const bindings = db.prepare(`SELECT r.binding_json FROM generation_attempts a JOIN generation_runs r ON r.run_id=a.run_id
-    WHERE json_valid(a.usage_receipt_json) AND json_extract(a.usage_receipt_json,'$.draftCommit.id')=?
-      AND json_extract(a.usage_receipt_json,'$.draftCommit.chapterNumber')=?`).pluck().all(draftId, chapterNumber) as string[]
+  const bindings = getGenerationLedgerIndex(db).draftCommitBindings(draftId, chapterNumber)
   if (bindings.length !== 1) return []
   const tasks = writtenChapterThreadTasks(bindings[0]!)
   if (!tasks) console.warn('[narrative-thread] 写稿记录里的线索任务读不出，这份稿的审稿不加线索目标', { draftId })

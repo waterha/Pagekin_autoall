@@ -11,6 +11,7 @@ import { BlueprintRepository } from '../repositories/blueprint-repository'
 import { buildFinalizedContinuityFacts } from '../../src/shared/finalized-continuity-facts'
 import { proveFinalizedCharacterGeneration } from './finalized-character-generation-proof'
 import type { CharacterProposalService } from './character-proposal-service'
+import { getGenerationLedgerIndex } from './generation-ledger-index'
 
 interface SavedEffect { version: 1; artifact: FinalizedCharacterArtifact; contextHash: string; receipt: FinalizationGenerationEffect; receiptHash: string }
 export class FinalizationGeneration {
@@ -18,12 +19,14 @@ export class FinalizationGeneration {
     private readonly transferOrigin: () => string | undefined = () => undefined) {}
   find(slot: FinalizationGenerationSlot): DurableGenerationRun | undefined {
     const key = finalizationSlotKey(slot)
-    const rows = this.db.prepare("SELECT run_id,json_extract(json_extract(open_key,'$[0]'),'$[2]') AS ui_action_nonce FROM generation_runs WHERE json_extract(binding_json,'$.sourceManifest.finalizationGenerationSlotKey')=? ORDER BY rowid").all(key) as { run_id: string; ui_action_nonce: string }[]
+    const runIds = getGenerationLedgerIndex(this.db).finalizationSlotRunIds(key)
+    const readNonce = this.db.prepare("SELECT json_extract(json_extract(open_key,'$[0]'),'$[2]') FROM generation_runs WHERE run_id=?").pluck()
     let previous: DurableGenerationRun | undefined
-    for (const row of rows) {
-      const run = this.runs.get(row.run_id)
+    for (const runId of runIds) {
+      const uiActionNonce = readNonce.get(runId) as string
+      const run = this.runs.get(runId)
       if (run.binding.projectId !== this.projectId || !isDeepStrictEqual(readFinalizationGenerationContext(run).slot, slot)
-        || previous && (this.effectInForce(previous) || row.ui_action_nonce !== `finalization:${key}:retry:${previous.runId}`))
+        || previous && (this.effectInForce(previous) || uiActionNonce !== `finalization:${key}:retry:${previous.runId}`))
         throw new Error('GENERATION_FINALIZATION_SLOT_CONFLICT')
       previous = run
     }

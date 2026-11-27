@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3'
 import { GenerationRunSummaries } from './generation-run-summaries'
+import { getGenerationLedgerIndex } from './generation-ledger-index'
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import type { BeginGenerationRequest, ExecuteGenerationRequest, BeginGenerationBatchRequest, GenerationDraftCommitRequest, GenerationRecoveryContext, MaterialAdmission, MaterialDecisionReceipt, VisibleCompositionAlgorithm, GenerationOwnerChannels, GenerationRecoveryList, ShortOutlineRetry, PlanningContinuation, PlanningDraftStanding } from '../../src/shared/generation-owner-contract'
@@ -145,12 +146,59 @@ async function dispatchProvider(value: unknown, options: Parameters<GenerationRu
 export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies) {
   const runtimeFreeze = readPortableRuntimeFreeze(getCurrentProjectPath())
   const repository = new GenerationRunRepository(() => deps.database, Date.now, (table, recordId) => runtimeFreeze.isFrozen(table, recordId))
+  const ledger = getGenerationLedgerIndex(deps.database)
   const draftEffects = new GenerationDraftEffects(deps.database, repository)
   const runLeases = new Map<string, string>()
   const volatileReceipts = new Map<string, GenerationExecutionReceipt>()
   const pending = new Map<string, { hash: string; promise: Promise<MainGenerationExecuteReceipt> }>()
   const preparations = new Map<string, { binding: RunBinding; knowledgeSnapshot: GenerationKnowledgeSnapshot }>()
   const learnedWindows = new Map<string, number>()
+  const MAX_RUN_LEASES = 128
+  const MAX_VOLATILE_RECEIPTS = 64
+  const MAX_LEARNED_WINDOWS = 128
+  const releaseRunLease = (runId: string) => {
+    const leaseId = runLeases.get(runId)
+    if (!leaseId) return
+    runLeases.delete(runId)
+    deps.leases.close(leaseId)
+  }
+  const releaseRootLeases = (rootActionId: string) => {
+    for (const runId of ledger.runIdsForRoot(rootActionId)) releaseRunLease(runId)
+  }
+  const rememberRunLease = (runId: string, leaseId: string) => {
+    const previous = runLeases.get(runId)
+    if (previous && previous !== leaseId) deps.leases.close(previous)
+    runLeases.delete(runId)
+    runLeases.set(runId, leaseId)
+    if (runLeases.size <= MAX_RUN_LEASES) return
+    for (const [candidateRunId, candidateLeaseId] of [...runLeases]) {
+      if (runLeases.size <= MAX_RUN_LEASES) break
+      if (candidateRunId === runId || planningRunInFlight(candidateRunId)) continue
+      runLeases.delete(candidateRunId)
+      deps.leases.close(candidateLeaseId)
+    }
+  }
+  const rememberVolatileReceipt = (attemptId: string, receipt: GenerationExecutionReceipt) => {
+    volatileReceipts.delete(attemptId)
+    volatileReceipts.set(attemptId, receipt)
+    while (volatileReceipts.size > MAX_VOLATILE_RECEIPTS) {
+      let evictKey: string | undefined
+      for (const [key, candidate] of volatileReceipts) {
+        if (!candidate.unsavedTail) { evictKey = key; break }
+      }
+      if (!evictKey) break
+      volatileReceipts.delete(evictKey)
+    }
+  }
+  const rememberLearnedWindow = (runId: string, windowTokens: number) => {
+    learnedWindows.delete(runId)
+    learnedWindows.set(runId, windowTokens)
+    while (learnedWindows.size > MAX_LEARNED_WINDOWS) {
+      const oldest = learnedWindows.keys().next().value
+      if (oldest === undefined) break
+      learnedWindows.delete(oldest)
+    }
+  }
   let closed = false
   const assertCurrent = () => {
     if (closed || !deps.database.open) throw new Error('GENERATION_OWNER_CLOSED')
@@ -166,7 +214,7 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
   const handleOf = (run: DurableGenerationRun): MainGenerationRunHandle => ({ projectId: run.binding.projectId,
     epoch: run.binding.epoch, rootActionId: run.rootActionId, runId: run.runId })
   const rootPolicy = (rootActionId: string): MainGenerationPolicy => {
-    const runId = deps.database.prepare('SELECT run_id FROM generation_runs WHERE root_action_id=? ORDER BY rowid LIMIT 1').pluck().get(rootActionId)
+    const runId = ledger.firstRunIdForRoot(rootActionId)
     if (typeof runId !== 'string') throw new Error('GENERATION_ROOT_MISSING')
     const policy = readMainGenerationPolicy(repository.get(runId).binding.sourceManifest.policy)
     if (policy.version !== MAIN_GENERATION_POLICY.version && !isDeepStrictEqual(policy.budget, repository.budget(rootActionId).policy))
@@ -189,12 +237,9 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
     return run
   }
   const attemptPurpose = (attemptId: string): string => {
-    const row = deps.database.prepare('SELECT usage_receipt_json FROM generation_attempts WHERE attempt_id=?').pluck().get(attemptId) as string | undefined
-    return row ? String(JSON.parse(row).purpose ?? 'unknown') : 'unknown'
+    return ledger.attemptPurpose(attemptId) ?? 'unknown'
   }
-  const runAttempts = (runId: string) => (deps.database.prepare('SELECT attempt_id,invocation_nonce,attempt_json,usage_receipt_json FROM generation_attempts WHERE run_id=? ORDER BY rowid').all(runId) as { attempt_id: string; invocation_nonce: string; attempt_json: string; usage_receipt_json: string }[])
-    .map(row => ({ attemptId: row.attempt_id, invocationNonce: row.invocation_nonce, status: String(JSON.parse(row.attempt_json).status),
-      purpose: String(JSON.parse(row.usage_receipt_json).purpose ?? 'unknown') }))
+  const runAttempts = (runId: string) => ledger.runAttemptSummaries(runId)
   const readFailedShortOutlineTask = (run: DurableGenerationRun, failedAttemptId: string): GenerationTask => {
     const decision = run.binding.sourceManifest.materialDecision as MaterialDecisionReceipt | undefined
     const first = runAttempts(run.runId)[0]
@@ -285,7 +330,7 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
     deps.rememberContextWindow?.(model, windowTokens)
     const budget = (repository.get(runId).binding.sourceManifest.materialDecision as MaterialDecisionReceipt | undefined)?.budget
     if (budget && [DRAFT_SHORT_OUTLINE_PURPOSE, 'chapter-draft'].includes(task.purpose)
-      && tightenMaterialBudget(budget, windowTokens).inputTokens < budget.inputTokens) learnedWindows.set(runId, windowTokens)
+      && tightenMaterialBudget(budget, windowTokens).inputTokens < budget.inputTokens) rememberLearnedWindow(runId, windowTokens)
   }
   /** 还没结束的请求；关闭作品时在关库前把它们记成已取消。 */
   const unrecordedCalls = new Set<() => void>()
@@ -562,8 +607,8 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
         frozenInputHash: textHash(JSON.stringify([binding.fingerprint, binding.contextSnapshotId, selection.output])),
         budget, parentRootActionId })
       if (parentRootActionId && repository.readPlotOutline(next.runId)) {
-        const rows = deps.database.prepare('SELECT run_id FROM generation_runs WHERE root_action_id=?').all(parentRootActionId) as { run_id: string }[]
-        if (rows.some(row => row.run_id !== next.runId && repository.readPlotOutline(row.run_id))) throw new Error('GENERATION_PLOT_OUTLINE_RECOVERY_REQUIRED')
+        const runIds = ledger.runIdsForRoot(parentRootActionId)
+        if (runIds.some(runId => runId !== next.runId && repository.readPlotOutline(runId))) throw new Error('GENERATION_PLOT_OUTLINE_RECOVERY_REQUIRED')
       }
       if (continuation?.continuationHandle && continuation.continuationHandle.runId !== next.runId) throw new Error('GENERATION_DIRECTORY_CONTINUATION_EXISTS')
       if (batch?.currentChapterRunHandle && batch.currentChapterRunHandle.runId !== next.runId) throw new Error('GENERATION_BATCH_RECOVERY_REQUIRED')
@@ -571,7 +616,7 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
       if (selection.agentWorkflowRegistrationId) agents.recordWorkflowChild(selection.agentWorkflowRegistrationId, handleOf(next))
       return next
       }).immediate()
-      if (run.binding.epoch === deps.epoch && !runLeases.has(run.runId)) runLeases.set(run.runId, lease.leaseId)
+      if (run.binding.epoch === deps.epoch && !runLeases.has(run.runId)) rememberRunLease(run.runId, lease.leaseId)
       else deps.leases.close(lease.leaseId)
       return viewOf(run)
     } catch (error) { deps.leases.close(lease.leaseId); throw error }
@@ -697,8 +742,13 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
     // 用冻结的模型凭据再重建一次：仍与原绑定一致才是只有模型变了；作品设定等也变了时报通用码。
     if (!isDeepStrictEqual(current, run.binding)) throw new Error(isDeepStrictEqual(deps.rebuildBinding(run.binding, modelReceipt(run.binding)), run.binding)
       ? 'GENERATION_SOURCE_CHANGED_MODEL' : 'GENERATION_SOURCE_CHANGED')
+    if (run.status === 'cancelled') {
+      if (repository.budget(run.rootActionId).blockedCode) throw new Error('GENERATION_DISPATCH_BLOCKED')
+      throw new Error('GENERATION_ACTION_CANCELLED')
+    }
     const leaseId = runLeases.get(run.runId)
     if (!leaseId) throw new Error('GENERATION_RESUME_REQUIRED')
+    rememberRunLease(run.runId, leaseId)
     const model = deps.leases.resolve(leaseId)
     const creativeStrategy = deps.database.prepare("SELECT creative_strategy FROM project_core WHERE id='main'").pluck().get() as CreativeStrategy | undefined
     const plan = buildMainGenerationPlan(model, modelReceipt(run.binding), task, repository.budget(run.rootActionId), creativeStrategy)
@@ -712,7 +762,7 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
       ...(run.binding.sourceManifest.importSlot || materialDecision?.shortOutlinePromptHash || repository.readPlotOutline(run.runId) ? { replayTask: task } : {}),
       ...(reconciliationInjected ? { reconciliationInjected } : {}),
       ...(agentExecution ? { agentToolNames: (run.binding.sourceManifest.agentContext as AgentGenerationContext).input.tools.map(tool => tool.name) } : {}) })
-    if (receipt.failureCode || receipt.unsavedTail) volatileReceipts.set(receipt.attempt.attemptId, receipt)
+    if (receipt.failureCode || receipt.unsavedTail) rememberVolatileReceipt(receipt.attempt.attemptId, receipt)
     assertCurrent()
     const snapshot = snapshotOf(receipt)
     if (snapshot) deps.onSnapshot?.(snapshot)
@@ -745,9 +795,7 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
       if (!isDeepStrictEqual(withFrozenWindowEvidence(safeGenerationModelReceipt(lease), receipt), receipt)) throw new Error('GENERATION_MODEL_CHANGED')
       const resumed = await service.resume(run.runId, next)
       assertCurrent()
-      const previous = runLeases.get(run.runId)
-      if (previous) deps.leases.close(previous)
-      runLeases.set(run.runId, lease.leaseId)
+      rememberRunLease(run.runId, lease.leaseId)
       return viewOf(resumed)
     } catch (error) { deps.leases.close(lease.leaseId); throw error }
   }
@@ -803,8 +851,7 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
     if (outline?.cursor.kind !== 'complete' || !outline.composition) return false
     return plotOutlineTargetCurrent(run, outline, renderPlotOutlineRange(outline.composition.text, outline.range, outline.sourceExpected))
   }
-  const projectGenerationInFlight = () => pending.size > 0 || !!deps.database.prepare(
-    "SELECT 1 FROM generation_attempts WHERE json_extract(attempt_json,'$.status') IN ('reserved','dispatch-marked') LIMIT 1").get()
+  const projectGenerationInFlight = () => pending.size > 0 || ledger.hasInFlightAttempt()
   const planningContinuation = (run: DurableGenerationRun): PlanningContinuation | undefined => {
     if (repository.isPrivatePlanningHistory(run.runId)) return undefined
     const outline = repository.readPlotOutline(run.runId)
@@ -856,8 +903,7 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
     const batch = outline.cursor.kind === 'complete' ? outline.composition?.text.trim() : undefined
     return !!batch && (ProjectCoreRepository.get(deps.database)?.synopsis ?? '').includes(batch)
   }
-  const planningRunInFlight = (runId: string) => [...pending.keys()].some(key => (JSON.parse(key) as [string])[0] === runId) || !!deps.database.prepare(
-    "SELECT 1 FROM generation_attempts WHERE run_id=? AND json_extract(attempt_json,'$.status') IN ('reserved','dispatch-marked') LIMIT 1").get(runId)
+  const planningRunInFlight = (runId: string) => [...pending.keys()].some(key => (JSON.parse(key) as [string])[0] === runId) || ledger.hasInFlightAttemptForRun(runId)
   /**
    * 拿不准就列出：多列的一份作者能自己放弃，误藏的一份作者根本不知道还在。
    * 导入原稿的 fill-empty 提交会把原有行原样记账，所以还要求这一章开跑以后确实变过。
@@ -1016,7 +1062,10 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
         ? { draftId, chapterNumber: row.chapter_number, version: row.version, contentHash: ref.contentHash, content: row.body,
             ...(requiredCandidateDraftIds.has(draftId) ? { required: true } : {}) } : null
     })
-    const rows = deps.database.prepare('SELECT attempt_id,usage_receipt_json FROM generation_attempts WHERE run_id=? ORDER BY rowid').all(run.runId) as { attempt_id: string; usage_receipt_json: string }[]
+    const rows = deps.database.prepare(`SELECT attempt_id,
+      CASE WHEN json_valid(usage_receipt_json) THEN json_extract(usage_receipt_json,'$.purpose') END AS purpose,
+      CASE WHEN json_valid(usage_receipt_json) THEN json_extract(usage_receipt_json,'$.reconciliationInjected') END AS reconciliation_injected
+      FROM generation_attempts WHERE run_id=? ORDER BY rowid`).all(run.runId) as { attempt_id: string; purpose: unknown; reconciliation_injected: unknown }[]
     const last = composition ? deps.database.prepare('SELECT attempt_id FROM generation_artifacts WHERE artifact_id=?').pluck().get(composition.artifactIds.at(-1)) as string : undefined
     return { modelId: modelReceipt(run.binding).modelId, handle: handleOf(run), operation: manifest.operation as string, chapterNumber: manifest.chapterNumber as number | undefined,
       ...(plotOutline ? { plotOutline, plotOutlineRecovery: plotOutlineRecovery(run, plotOutline) } : {}),
@@ -1035,15 +1084,15 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
       selectedDraftIds: structuredClone(manifest.selectedDraftIds as number[] ?? []), selectedFinalizedDraftIds: structuredClone(manifest.selectedFinalizedDraftIds as number[] ?? []),
       selectedBlueprintChapterNumbers: structuredClone(manifest.selectedBlueprintChapterNumbers as number[] ?? []), composition,
       lastCompositionFinishReason: last ? repository.receipt(last).result?.finishReason ?? null : null,
-      attemptedPurposes: rows.map(row => JSON.parse(row.usage_receipt_json).purpose ?? 'unknown'),
+      attemptedPurposes: rows.map(row => typeof row.purpose === 'string' ? row.purpose : 'unknown'),
       ...(materialDecision?.shortOutlinePromptHash ? { draftShortOutline: shortOutlineContext(run) } : {}),
-      ...(rows.some(row => JSON.parse(row.usage_receipt_json).purpose === DRAFT_RECONCILE_PURPOSE) ? { draftReconciliation: {
-        artifactIds: rows.filter(row => JSON.parse(row.usage_receipt_json).purpose === DRAFT_RECONCILE_PURPOSE)
+      ...(rows.some(row => row.purpose === DRAFT_RECONCILE_PURPOSE) ? { draftReconciliation: {
+        artifactIds: rows.filter(row => row.purpose === DRAFT_RECONCILE_PURPOSE)
           .flatMap(row => { const artifact = repository.receipt(row.attempt_id).artifact; return artifact ? [artifact.artifactId] : [] }),
         // 首稿已发出时，只有首稿提示经复核确实带了注入块，续写/压缩才沿用；首稿尚未发出时沿用记录的对账结果。
         completedOutput: (() => {
-          const firstDraft = rows.find(row => JSON.parse(row.usage_receipt_json).purpose === 'chapter-draft')
-          return !firstDraft || JSON.parse(firstDraft.usage_receipt_json).reconciliationInjected === true ? completedReconciliationOutput(run.runId) : null
+          const firstDraft = rows.find(row => row.purpose === 'chapter-draft')
+          return !firstDraft || Boolean(firstDraft.reconciliation_injected) ? completedReconciliationOutput(run.runId) : null
         })() } } : {}),
       draftSave,
       ...(manifest.knowledgeSnapshot ? { knowledgeSnapshot: structuredClone(manifest.knowledgeSnapshot) as GenerationKnowledgeSnapshot } : {}),
@@ -1177,14 +1226,51 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
    * 蓝图页挂载时要的那份：最新一个还没写完的章节蓝图恢复稿；只读章节蓝图运行，读不出的跳过，不挡更早的恢复稿。
    * 判定同 planningRecoverable，不可恢复的跳过，找更早的。
    */
-  const findBlueprintRecovery = (): GenerationRecoveryContext | null => {
+  const isDismissedDirectoryRun = (runId: string): boolean => {
+    try {
+      if (planningRunInFlight(runId) || !repository.planningDismissed(runId)) return false
+      const run = repository.get(runId)
+      const directory = (run.binding.sourceManifest.authorInputs as GenerationAuthorInput[] | undefined)
+        ?.find(input => input.id === 'directory:requested-range')
+      if (!directory) return false
+      JSON.parse(directory.text)
+      return true
+    } catch {
+      return false
+    }
+  }
+  function* blueprintRecoveryReads(): Generator<void, GenerationRecoveryContext | null, void> {
     assertCurrent()
     for (const run of runSummaries().filter(item => item.operation === 'chapter-blueprint-directory')) {
+      assertCurrent()
+      if (isDismissedDirectoryRun(run.handle.runId)) {
+        yield
+        continue
+      }
       let recovery: GenerationRecoveryContext
-      try { recovery = readContext(run.handle) } catch { continue }
+      try { recovery = readContext(run.handle) } catch { yield; continue }
       if (recovery.blueprintRecovery && recovery.blueprintRecovery.writeState !== 'complete' && planningRecoverable(recovery)) return recovery
+      yield
     }
     return null
+  }
+  const findBlueprintRecovery = (): GenerationRecoveryContext | null => {
+    const reads = blueprintRecoveryReads()
+    for (;;) { const next = reads.next(); if (next.done) return next.value }
+  }
+  const findBlueprintRecoveryAsync = async (): Promise<GenerationRecoveryContext | null> => {
+    await prepareRecoveryReads()
+    const reads = blueprintRecoveryReads()
+    let yieldedAt = performance.now()
+    for (;;) {
+      const next = reads.next()
+      if (next.done) return next.value
+      if (performance.now() - yieldedAt >= 8) {
+        await new Promise<void>(resolve => setImmediate(resolve))
+        assertCurrent()
+        yieldedAt = performance.now()
+      }
+    }
   }
   const finalizationRecovery = (run: DurableGenerationRun): FinalizationGenerationRecovery => {
     assertCurrent()
@@ -1430,8 +1516,8 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
       if (request.parentRootActionId !== undefined) {
         const root = repository.budget(request.parentRootActionId).root
         if (root.operation !== 'batch-chapters' || root.projectId !== deps.projectId || parentRootActionId && parentRootActionId !== request.parentRootActionId) throw new Error('GENERATION_FINALIZATION_PARENT_INVALID')
-        const rows = deps.database.prepare('SELECT run_id FROM generation_runs WHERE root_action_id=? ORDER BY rowid').all(root.rootActionId) as { run_id: string }[]
-        const committed = rows.map(row => repository.get(row.run_id)).filter(run => run.binding.sourceManifest.operation === 'chapter-draft')
+        const runIds = ledger.runIdsForRoot(root.rootActionId)
+        const committed = runIds.map(runId => repository.get(runId)).filter(run => run.binding.sourceManifest.operation === 'chapter-draft')
           .map(run => ({ run, receipt: draftEffects.readCommit(run.runId) })).find(item => item.receipt?.id === slot.source.draftId)
         if (!committed || committed.receipt?.contentHash !== slot.source.contentHash) throw new Error('GENERATION_FINALIZATION_PARENT_INVALID')
         parentRootActionId = root.rootActionId; selectedModelId = modelReceipt(committed.run.binding).modelId
@@ -1693,7 +1779,7 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
     prepareReviewRevision: (request: PrepareReviewRevisionRequest) => reviewRevisions.prepare(request),
     commitReview: (request: ReviewGenerationCommitRequest) => reviewRevisions.commitReview(request, assertSourcesCurrent),
     commitRevision: (request: RevisionGenerationCommitRequest) => reviewRevisions.commitRevision(request, assertSourcesCurrent),
-    readReviewRevisionRecovery, listRecovery, listRecoveryAsync, prepareRecoveryReads, findBlueprintRecovery, dismissPlanningRecovery,
+    readReviewRevisionRecovery, listRecovery, listRecoveryAsync, prepareRecoveryReads, findBlueprintRecovery, findBlueprintRecoveryAsync, dismissPlanningRecovery,
     readContext, readBatch, prepareDraftContext, preparedKnowledge, draftPreparationBinding, retryDraftShortOutline,
     beginBatch: (request: BeginGenerationBatchRequest) => {
       assertGenerationBatchIntent(request)
@@ -1762,7 +1848,7 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
       return composition ? { ...composition, authorInputs: structuredClone(run.binding.sourceManifest.authorInputs as GenerationAuthorInput[] | undefined) } : null
     },
     pause: (handle: MainGenerationRunHandle) => { const run = requireRun(handle, true); service.pause(run.rootActionId); return viewOf(repository.get(run.runId)) },
-    cancel: (handle: MainGenerationRunHandle) => { const run = requireRun(handle); service.cancel(run.rootActionId); return viewOf(repository.get(run.runId)) },
+    cancel: (handle: MainGenerationRunHandle) => { const run = requireRun(handle); service.cancel(run.rootActionId); releaseRootLeases(run.rootActionId); return viewOf(repository.get(run.runId)) },
     restart: (handle: MainGenerationRunHandle, selection: BeginGenerationRequest) => {
       const old = requireRun(handle)
       repository.assertBlueprintRecoveryWritable(old.runId)
@@ -1794,12 +1880,14 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
           throw new Error('GENERATION_PLANNING_CONTINUATION_RANGE_CHANGED')
         const next = begin(selection)
         service.cancel(old.rootActionId)
+        releaseRootLeases(old.rootActionId)
         repository.recordPlanningContinuation({ kind: 'planning-continuation', sourceHandle: handleOf(old), nextHandle: next.handle, requestHash })
         return next
       }).immediate()
       // Admit the replacement before cancelling; rejected sources must leave the original resumable.
       const next = begin(selection)
       service.cancel(old.rootActionId)
+      releaseRootLeases(old.rootActionId)
       return next
     },
     discardCandidate: (handle: MainGenerationRunHandle, artifactId: string) => {
@@ -1818,6 +1906,8 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
     },
     suspendForProjectClose: () => {
       preparations.clear()
+      volatileReceipts.clear()
+      learnedWindows.clear()
       finalizedCharacters.close()
       reviewRevisions.close()
       if (closed) return

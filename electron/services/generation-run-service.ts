@@ -153,7 +153,19 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
             let agentProtocolText = '';
             const events = new Map<string, string>();
             let displayTimer: ReturnType<typeof setTimeout> | undefined;
+            let pendingReasoning = '';
+            let reasoningTimer: ReturnType<typeof setTimeout> | undefined;
+            const flushReasoning = () => {
+                clearTimeout(reasoningTimer);
+                reasoningTimer = undefined;
+                if (!pendingReasoning) return;
+                const chunk = pendingReasoning;
+                pendingReasoning = '';
+                try { deps.onReasoning?.({ runId: run.runId, rootActionId: run.rootActionId, attemptId, text: chunk }); }
+                catch { /* A display-only event cannot alter durable generation. */ }
+            };
             const notify = () => { try {
+                flushReasoning();
                 clearTimeout(displayTimer);
                 displayTimer = undefined;
                 deps.onSnapshot?.({ attemptId, visibleText: text, durableText: durable, durableRevision: revision, storageFailed, diagnostics, receipt });
@@ -164,6 +176,10 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
             // Checkpoints below still persist and notify immediately, independently.
             const scheduleDisplay = () => {
                 displayTimer ??= setTimeout(notify, 100);
+            };
+            const scheduleReasoning = (chunk: string) => {
+                pendingReasoning += chunk;
+                reasoningTimer ??= setTimeout(flushReasoning, 100);
             };
             const flush = () => {
                 if (storageFailed || text === durable)
@@ -228,8 +244,7 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
                         scheduleDisplay();
                     }, onReasoning: chunk => {
                         if (terminal || storageFailed || controller.signal.aborted || !chunk) return;
-                        try { deps.onReasoning?.({ runId: run.runId, rootActionId: run.rootActionId, attemptId, text: chunk }); }
-                        catch { /* A display-only event cannot alter durable generation. */ }
+                        scheduleReasoning(chunk);
                     }, onVisible: event => {
                         if (terminal || storageFailed || controller.signal.aborted)
                             return;
@@ -279,6 +294,7 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
                     usage = { ...usage!, agentResponse: { version: 1, visibleText: parsed.visibleText, toolCalls: parsed.toolCalls } };
                 }
                 else retainInterruptedAgentText();
+                flushReasoning();
                 flush();
                 receipt = deps.repository.settle(attemptId, usage, storageFailed ? 'error' : result.finishReason, storageFailed ? 'GENERATION_STORAGE_FAILED' : undefined, diagnostics);
             }
@@ -287,6 +303,7 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
                     elapsedMs: diagnostics.elapsedMs + Math.max(0, Math.round(performance.now() - diagnosticsAt)),
                     endReason: controller.signal.aborted ? 'cancelled' : 'failed' };
                 retainInterruptedAgentText();
+                flushReasoning();
                 flush();
                 try {
                     if (suspended) return { ...receipt, ...(storageFailed ? { unsavedTail: text.slice(durable.length) } : {}), failureCode: 'GENERATION_PROJECT_CLOSED' };
@@ -314,6 +331,8 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
             finally {
                 terminal = true;
                 clearTimeout(displayTimer);
+                clearTimeout(reasoningTimer);
+                pendingReasoning = '';
                 if (timer)
                     clearInterval(timer);
                 if (deadline)
