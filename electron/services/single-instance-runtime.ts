@@ -1,7 +1,10 @@
-export interface SingleInstanceWindow {
-  isDestroyed(): boolean
-  isMinimized(): boolean
-  restore(): void
+import {
+  ensureWindowVisible,
+  type DisplayLike,
+  type RepairableWindow,
+} from './window-visibility'
+
+export interface SingleInstanceWindow extends RepairableWindow {
   show(): void
   focus(): void
 }
@@ -12,11 +15,20 @@ export interface SingleInstanceRuntimeOptions {
   quit(): void
   onSecondInstance(listener: () => void): void
   getWindow(): SingleInstanceWindow | null | undefined
+  getDisplays?(): readonly DisplayLike[]
 }
 
-export function focusExistingInstance(window: SingleInstanceWindow | null | undefined): void {
+/**
+ * Raised from the taskbar, a second launch has to undo a stale off-screen
+ * placement as well as un-minimize: `restore()` alone re-applies the placement
+ * Windows remembers, which can be the minimized sentinel.
+ */
+export function focusExistingInstance(
+  window: SingleInstanceWindow | null | undefined,
+  displays: readonly DisplayLike[] = [],
+): void {
   if (!window || window.isDestroyed()) return
-  if (window.isMinimized()) window.restore()
+  ensureWindowVisible(window, displays)
   window.show()
   window.focus()
 }
@@ -32,6 +44,8 @@ export function configureSingleInstanceRuntime(options: SingleInstanceRuntimeOpt
     options.quit()
     return false
   }
-  options.onSecondInstance(() => focusExistingInstance(options.getWindow()))
+  options.onSecondInstance(() => {
+    focusExistingInstance(options.getWindow(), options.getDisplays?.() ?? [])
+  })
   return true
 }

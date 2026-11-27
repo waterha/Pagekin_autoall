@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, screen, shell } from 'electron'
 import { registerIPCHandlers } from './ipc-handlers'
 import { registerMCPHandlers } from './mcp/mcp-ipc-bridge'
 import { mainT } from './i18n'
@@ -33,6 +33,7 @@ import {
 } from './services/official-homepage-navigation'
 import { configureSingleInstanceRuntime } from './services/single-instance-runtime'
 import { installWindowCloseGuard } from './controllers/window-controller'
+import { installWindowVisibilityGuard } from './controllers/window-visibility-guard'
 import { registerStartupController } from './controllers/startup-controller'
 import { resolveDefaultUserData, resolveGlobalDataRoots } from './services/app-data-locator'
 import { runGlobalDataMigration, activateGlobalData } from './services/global-data-migration'
@@ -99,6 +100,7 @@ const applicationInstanceAccepted = configureSingleInstanceRuntime({
   quit: () => app.quit(),
   onSecondInstance: listener => { app.on('second-instance', () => listener()) },
   getWindow: () => win,
+  getDisplays: () => screen.getAllDisplays(),
 })
 let releaseSmokeStage = 'not-requested'
 let releaseSmokeTimeout: NodeJS.Timeout | undefined
@@ -153,6 +155,9 @@ function createWindow() {
   })
   // A diagnostic-only window has no editor and no business close responder.
   if (!startupBlockedCode) installWindowCloseGuard(win)
+  // Windows 会把“最小化哨兵位置”记成窗口的正常位置，之后再还原就落到屏幕外，
+  // 表现为程序还在运行却怎么都点不出来；每次还原后重新校正到可见工作区。
+  installWindowVisibilityGuard(win, () => screen.getAllDisplays())
 
   // 打包后的 Dock 图标来自 icon.icns（按 macOS 网格留了边）；icon.png 是满版的，只在开发时顶上。
   if (process.platform === 'darwin' && !app.isPackaged) {
